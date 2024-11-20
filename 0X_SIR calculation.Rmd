@@ -134,6 +134,7 @@ full_dat$gestational_diab <- ifelse(full_dat$gestationaldiabetes == 1, 1, 0)
 
 # outcome: preterm birth
 full_dat$preterm <- ifelse(full_dat$gestation < 34, "preterm", "term")
+full_dat$preterm_code <- ifelse(full_dat$preterm == "preterm", 1, 0)
 
 # outcome: very preterm birth
 full_dat$very_preterm <- ifelse(full_dat$gestation < 30, "preterm", "term")
@@ -144,7 +145,7 @@ full_dat$gender_code <- ifelse(full_dat$gender == "M", 1, 0)
 
 # combine outcome and exposures (clusters)
 z_y <- merge(z, full_dat[, c("momid", "grid_id", 
-                             "pl_insuf", "preterm",
+                             "pl_insuf", "preterm", "preterm_code",
                              "gestational_hyp", "very_preterm", #"sga_code",
                              "gestational_diab", "gender_code")], 
              by = c("momid", "grid_id"))
@@ -464,12 +465,296 @@ for(i in 1:length(names(null_diff_cl))) {
 
 ```
 
-Confidence interval calculation
+Confidence interval calculation  
+- with bootstrap
+1. generate bootstrap sample  
+2. for each week, 
+
 
 ```{r}
 
-##
 
+perm_ci <- function(dat) {
+  dt_res_ci = data.frame()
+  
+  for (i in 4:48){
+    
+    ci_dat <- randomize(dat)
+    
+    x = as.character(ci_dat[, i])
+    # shuffle the x values:
+    
+    dt_temp = data.frame(table(x, ci_dat$preterm)) # put the outcome here
+    #dt_temp$Var1 = names(z_sga)[i]
+    #dt_temp$Var2 = names(z_sga)[i + 1]
+    dt_temp$week <- paste(names(ci_dat)[i])
+    
+    dt_res_ci = rbind(dt_res_ci, dt_temp)
+    
+  }
+  # str(dt_res_ci)
+  
+  
+  names(dt_res_ci) <- c("cluster", "y", "freq", "week")
+  # print(table(dt_res_mc$cluster_mc))
+  
+  # cluster 0 means you weren't pregnant in that week; remove
+  dt_res_ci <- dt_res_ci |>
+    filter(!cluster == 0)
+  
+  # SIR
+  dt_res_ci$target_cluster <- ifelse(dt_res_ci$cluster == 10, 
+                                     "target_cluster", "other_cluster")
+  # print(head(dt_res_ci))
+  
+  dt_res_wide_ci <- dt_res_ci |>
+    tidyr::pivot_wider(id_cols = c(cluster, target_cluster), 
+                       names_from = c(y, week), 
+                       values_from = freq)
+  
+  # print(str(dt_res_wide_ci))
+  
+  target_cluster_ci <- data.frame()
+  
+  for(i in seq(from = 3, to = ncol(dt_res_wide_ci), by = 2)) {
+    var_app <- i
+    var_sm <- i + 1
+    
+    res_mc <- dt_res_wide_ci[, c(2, var_app, var_sm)]
+    
+    res_mc$pop <- rowSums(res_mc[2:3])
+    
+    names(res_mc) <- c("cluster", "hyp", "no", "pop")
+    
+    E <- expected(
+      population = res_mc$pop,
+      cases = res_mc$hyp,
+      n.strata = 1
+    )
+    
+    res_mc$E <- E
+    res_mc$SIR <- res_mc[, "hyp"] / res_mc[, "E"]
+    
+    res_mc$week <- str_sub(names(dt_res_wide_ci)[i + 1], 
+                           start = (nchar(names(dt_res_wide_ci)[i + 1])-1),
+                           end = nchar(names(dt_res_wide_ci)[i + 1]))
+    res_mc$week <- gsub("_", "", res_mc$week)
+    res_mc$week <- as.numeric(res_mc$week)
+    
+    target_cluster_ci <- rbind(target_cluster_ci, res_mc)
+    
+  } 
+  
+  target_cluster_ci_sir <- target_cluster_ci |>
+    filter(cluster == "target_cluster")
+  
+  target_cluster_ci_sir$SIR <- target_cluster_ci_sir$SIR$hyp
+  
+  target_cluster_ci_sir[, c("SIR")]
+}
+
+# one iteration
+perm_ci(z_y)
+
+# many iterations
+plan(multisession, workers = (detectCores() - 1))
+
+system.time(
+  sir_ci <- future_replicate(1000, perm_ci(z_y))
+)
+
+# each row is one MC run
+# each column is one week
+sir_ci_mc <- map_df(sir_ci, ~as.data.frame(t(.)))
+head(sir_ci_mc)
+
+
+for(i in 1:ncol(sir_ci_mc)) {
+  mean(sir_ci_mc[, i], na.rm = TRUE)
+  quantile(sir_ci_mc[, i], c(0.025, 0.975), na.rm = TRUE)
+}
+
+ci <- data.frame()
+# snag confidence intervals
+for(i in 1:ncol(sir_ci_mc)) {
+  
+  ci <- rbind(ci, c(i,
+                    mean(sir_ci_mc[, i], na.rm = TRUE),
+                    quantile(sir_ci_mc[, i], c(0.025), na.rm = TRUE),
+                    quantile(sir_ci_mc[, i], c( 0.975), na.rm = TRUE)))
+}
+
+names(ci) <- c("week", "bs_mean", "bs_lower", "bs_upper")
+
+cluster_5_ci <- merge(cluster_5_only, ci, by = "week")
+cluster_5_ci$SIR <- cluster_5_ci$SIR$hyp
+
+ggplot(cluster_5_ci, aes(x = week, y = SIR)) +
+  geom_point() +
+  theme_bw()
+
+ggplot(cluster_5_ci, aes(x = week, y = SIR)) +
+  geom_point() +
+  geom_linerange(aes(ymin = bs_lower, ymax = bs_upper)) +
+  geom_hline(yintercept = 1, style = 'dotted') +
+  theme_classic()
+
+
+```
+
+
+
+
+```{r}
+
+# 
+# randomize = function(dat) {
+#   # number of observed pairs
+#   n = nrow(dat)
+#   # sample the rows to determine which will be kept
+#   keep = sample(x = 1:n, size = n, replace = T)
+#   # retreive these rows from the data
+#   dat[keep, ]
+# }
+# 
+# nrow(setdiff(z_y, randomize(z_y)))
+# 
+# # "model of interest" — we're interested in SIR calculation
+# fit_vonB = function(dat) {
+#    
+#   fit <- glm(preterm_code ~ 1, data = dat, family = binomial(link = "log"))
+#   
+#   # obtain 
+#   fit
+# }
+# names(z_y)
+# fit_vonB(randomize(z_y))
+# 
+# # create a vector of ages
+# # ages = c(0, 1)
+# pred_vonB = function(fit) {
+#   # extract the coefficients
+#   exp(coef(fit))
+# }
+# 
+# pred_vonB(fit = fit_vonB(dat = randomize(dat = z_y)))
+# 
+# # set.seed(2)
+# out = replicate(n = 100, expr = {
+#   pred_vonB(fit = fit_vonB(dat = randomize(dat = z_y)))
+# })
+# 
+# str(out)
+# hist(out)
+# 
+# mean(out)
+# quantile(out, c(0.025, 0.975))
+# 
+# summ = apply(out, function(x) c(mean = mean(x), quantile(x, c(0.025, 0.975))))
+# 
+# # Next, write a function to predict mean length-at-age
+# # create a vector of ages
+# 
+# 
+# 
+# 
+# pred_vonB(fit = fit_vonB(dat = randomize(dat = z_y$preterm_code)))
+# boot_samp <- randomize(dat = z_y)
+# str(boot_samp)
+# 
+# 
+# ##
+# perm_ci <- function(y) { # takes data
+#   
+#   dt_res_mc = data.frame()
+#   
+#   for (i in 4:48){
+#     
+#     x = as.character(y[, i])
+#     # shuffle the x values:
+#     # x_shuff = sample(x)
+#     
+#     dt_temp = data.frame(table(y[, i], y$preterm)) # put the outcome here
+#     #dt_temp$Var1 = names(z_sga)[i]
+#     #dt_temp$Var2 = names(z_sga)[i + 1]
+#     dt_temp$week <- paste(names(y)[i])
+#     
+#     dt_res_mc = rbind(dt_res_mc, dt_temp)
+#     
+#   }
+#   dt_res_mc
+# }
+# 
+# perm_ci(z_y)
+# 
+# 
+# 
+# runs <- 100
+# 
+# sims <- rnorm(runs, mean = 1, sd = 10)
+# sims <- rbinom(runs, size = 1, prob = (table(z_y$preterm == "preterm")[[2]] / nrow(z_y)))
+# mc.integral <- sum(sims >= 3 & sims <= 6)/runs
+# 
+# summary(sims)
+# 
+# 
+# runs <- 100
+# p <- (table(z_y$preterm == "preterm")[[2]] / nrow(z_y))
+# 
+# #one.trail simulates a single round of toss 10 coins
+# #and returns true if the number of heads is > 3
+# one.trial <- function(){
+#   sum(sample(c(0, 1), prob = c(1 - p, p), 10, replace=T)) > 3
+# }
+# #now we repeat that trial 'runs' times.
+# mc.binom <- sum(replicate(runs, one.trial()))/runs
+# summary(mc.binom)
+# 
+# ```
+# 
+# ### example from https://bstaton1.github.io/au-r-workshop/ch4.html#boot-test-ex
+# 
+# ```{r}
+# 
+# growth <- read.csv("/Users/brenna/Downloads/growth.csv")
+# 
+# 
+# randomize = function(dat) {
+#   # number of observed pairs
+#   n = nrow(dat)
+#   # sample the rows to determine which will be kept
+#   keep = sample(x = 1:n, size = n, replace = T)
+#   # retreive these rows from the data
+#   dat[keep,]
+# }
+# 
+# setdiff(growth, randomize(growth))
+# 
+# 
+# fit_vonB = function(dat) {
+#   nls(length ~ linf * (1 - exp(-k * (age - t0))),
+#       data = dat,
+#       start = c(linf = 600, k = 0.3, t0 = -0.2)
+#       )
+# }
+# 
+# fit_vonB(randomize(growth))
+# 
+# 
+# 
+# 
+# 
+# 
+# # create a vector of ages
+# ages = min(growth$age):max(growth$age)
+# pred_vonB = function(fit) {
+#   # extract the coefficients
+#   ests = coef(fit)
+#   # predict length-at-age
+#   ests["linf"] * (1 - exp(-ests["k"] * (ages - ests["t0"])))
+# }
+# 
+# pred_vonB(fit = fit_vonB(dat = randomize(dat = growth)))
 
 ```
 
