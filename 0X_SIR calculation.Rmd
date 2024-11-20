@@ -1,0 +1,485 @@
+---
+title: "0X_SIR calculation"
+author: "Brenna Kelly"
+date: "2024-11-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+
+library(sf)
+library(tmap)
+library(tidyr)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(stringr)
+library(SpatialEpi)
+# library(data.table)
+
+```
+
+adding cluster assignments to birth data, based on grid id and study week:
+
+```{r}
+
+
+cluster_week <- read.csv("data/clean_data/clusters_by_gridweek_v2.csv")
+full_dat <- read.csv("data/births/clean_birth_data.csv")
+
+
+# birth-grids with start week
+grid <- fread("data/births/gridded_births_morebw.csv")
+# sub grid_exp with full_dat
+
+full_dat$start_week <- full_dat$birth_week - full_dat$gestation
+
+births <- full_dat |>
+  # filter(start_week > 0) |>
+  select(c(momid, grid_id, birth_week, start_week))
+
+names(births) <- c("momid", "grid_id", "week", "start_week")
+births <- births[order(births$week), ]
+
+births$birth_week <- births$week
+
+birth_wks <- births %>%
+  mutate(val = NA) %>%
+  pivot_wider(id_cols = c(momid, grid_id, start_week, birth_week), names_from = week, values_from = val)
+
+names(birth_wks)
+
+names(birth_wks)[5:213] <- paste0("week_", names(birth_wks)[5:213])
+
+birth_wks <- birth_wks %>%
+  mutate(across(week_1:week_209, ~ NA))
+
+cluster_week$momid <- NA
+cluster_week$start_week <- NA
+cluster_week$birth_week <- NA
+
+fill_vars <- names(birth_wks)[5:213]
+
+x <- rbind(birth_wks, cluster_week) %>%
+  group_by(grid_id) %>%
+  fill(fill_vars, .direction = "downup") %>%
+  drop_na()
+head(x)
+
+x <- x |>
+  filter(start_week > 0)
+
+for(i in 20417:nrow(x)) {
+  # make weeks not in pregnancy NA
+  end <- x[[i, "birth_week"]]
+  start <- x[[i, "start_week"]]
+  x[i, ] <- x[i, ] %>%
+    mutate_at(-c(1:4, (start + 4):(end + 4)), ~ NA)
+}
+
+
+print(head(x))
+
+write.csv(x, "data/births/birth_traj_jun08.csv", row.names = FALSE)
+
+```
+
+tidying up:
+
+```{r}
+
+x <- fread("data/births/birth_traj_jun08.csv")
+
+# # make clusters one column
+x <- unite(x, col = "all_clusters", c(5:213), sep = ", ", na.rm = TRUE)
+
+x <- x[, c("momid", "grid_id", "birth_week", "all_clusters")]
+
+z <- x |>
+  separate(all_clusters, into = paste0("week_", c(1:45)), ", ") |>
+  mutate_at(c(4:48), ~ ifelse(is.na(.), 0, .)) |>
+  mutate_at(c(4:48), ~ as.factor(.))
+
+write.csv(z, "data/births/birth_traj_trunc_jun08.csv", row.names = FALSE)
+
+```
+
+combining exposures and outcomes
+
+```{r}
+
+# birth data
+full_dat <- read.csv("data/clean_birth_data.csv")
+
+# trajectories
+z <- read.csv("data/birth_traj_trunc_jun08.csv")
+
+# outcome: placental insufficiency
+full_dat$hypertension_code <- ifelse(full_dat$hypertension %in% c("C", "E", "H", "P"),
+                                "hyp", "no")
+full_dat$pl_insuf <- case_when(full_dat$sga10_by_sex > full_dat$birthweightgrams ~ 1, # sga
+                           full_dat$hypertension %in% c("H", "E", "P") ~ 1)
+full_dat$pl_insuf <- ifelse(is.na(full_dat$pl_insuf), 0, 1)
+
+# outcome: gestational hypertension
+full_dat$gestational_hyp <- ifelse(full_dat$hypertension %in% c("H", "E", "P"), 1, 0)
+
+# outcome: gestational diabetes
+full_dat$gestational_diab <- ifelse(full_dat$gestationaldiabetes == 1, 1, 0)
+
+# outcome: preterm birth
+full_dat$preterm <- ifelse(full_dat$gestation < 34, "preterm", "term")
+
+# outcome: very preterm birth
+full_dat$very_preterm <- ifelse(full_dat$gestation < 30, "preterm", "term")
+
+# *negative control* outcome: gender
+full_dat$gender_code <- ifelse(full_dat$gender == "M", 1, 0)
+
+
+# combine outcome and exposures (clusters)
+z_y <- merge(z, full_dat[, c("momid", "grid_id", 
+                             "pl_insuf", "preterm",
+                             "gestational_hyp", "very_preterm", #"sga_code",
+                             "gestational_diab", "gender_code")], 
+             by = c("momid", "grid_id"))
+
+```
+
+### aggregating number of disease/disease-free by exposure-week
+
+```{r}
+
+names(z_y)[4:48]
+
+dt_res = data.frame()
+for (i in 4:48){
+
+  dt_temp = data.frame(table(z_y[, i], z_y$preterm)) # put the outcome here
+  #dt_temp$Var1 = names(z_sga)[i]
+  #dt_temp$Var2 = names(z_sga)[i + 1]
+  dt_temp$week <- paste(names(z_y)[i])
+
+  dt_res = rbind(dt_res, dt_temp)
+
+}
+
+# here we have the number of cases and non-cases for each pregnancy week and cluster
+names(dt_res) <- c("cluster", "y", "freq", "week")
+
+# cluster 0 means you weren't pregnant in that week; remove
+dt_res <- dt_res |>
+  filter(!cluster == 0)
+
+```
+
+
+### calculating standardized incidence ratios
+
+Outcomes to investigate further:  
+- cluster 7 and preterm birth, weeks 0:20    
+- cluster 8 and preterm birth, weeks 20:30   
+- cluster 10 and preterm birth, weeks 7:13 (this is the one)  
+- cluster 11 and preterm birth, weeks 7:13 (lower risk)   
+
+- cluster 11 and placental insufficiency, weeks 10:20 (2% higher risk; CI prob overlaps)  
+
+negative control
+- gender doesn't seem to have a relationship with exposure (...good)  
+
+
+```{r}
+
+# choose a cluster
+cluster_of_interest = 10
+
+dt_res$target_cluster <- ifelse(dt_res$cluster == cluster_of_interest, 
+                                "target_cluster", "other_cluster")
+dt_res_wide <- dt_res |>
+  pivot_wider(names_from = c(y, week), 
+              values_from = freq)
+
+target_cluster <- data.frame()
+
+# this loops through each week by case and non-case status
+for(i in seq(from = 3, to = 92, by = 2)) {
+  var_app <- i
+  var_sm <- i + 1
+
+  res <- dt_res_wide[, c(2, var_app, var_sm)]
+
+  res$pop <- rowSums(res[2:3])
+  names(res) <- c("cluster", "hyp", "no", "pop")
+
+  E <- expected(
+    population = res$pop,
+    cases = res$hyp,
+    n.strata = 1
+  )
+
+  res$E <- E#[match(res[, "Var1"], unique(res[, "Var1"]))]
+  res$SIR <- res[, "hyp"] / res[, "E"]
+  res$week <- str_sub(names(dt_res_wide)[i + 1], start = (nchar(names(dt_res_wide)[i + 1])-1),
+                      end = nchar(names(dt_res_wide)[i + 1]))
+  res$week <- gsub("_", "", res$week)
+  res$week <- as.numeric(res$week)
+
+  target_cluster <- rbind(target_cluster, res)
+}
+
+cluster_5_only <- target_cluster |>
+  filter(cluster == "target_cluster") |>
+  filter(week < 34)
+
+plot(cluster_5_only$week, cluster_5_only$SIR$hyp,
+     xlab = "Pregnancy Week",
+     ylab = "outcome SIR", main = paste0("Cluster ", cluster_of_interest))
+abline(h = 1, lty = 2)
+
+```
+
+
+### permutation
+
+```{r}
+
+library(rsample)
+set.seed(4325)
+
+# testing, just for a single week and cluster
+z_y_week_12 <- z_y |>
+  dplyr::select(c("week_12", "preterm")) |>
+  mutate(cluster_week = ifelse(week_12 == 10, 1, 0)) |>
+  mutate(preterm = ifelse(preterm == "preterm", 1, 0))
+
+perm(z_y_week_12$cluster_week, z_y_week_12)
+
+Dnull = replicate(n = 5000, expr = perm(z_y_week_12$cluster_week, z_y_week_12))
+
+Dobs = mean(z_y_week_12[z_y_week_12$cluster_week == "1", "preterm"]) - mean(z_y_week_12[z_y_week_12$cluster_week == "0", "preterm"])
+
+hist(Dnull, col = "grey")
+abline(v = Dobs, col = "blue", lwd = 3, lty = 2)
+
+table(Dnull > Dobs) # 2 in 5000
+mean(abs(Dnull) >= Dobs) # p = 8e-0.4 for week 12
+
+# writing a function, to scale this up for all weeks
+perm = function(x, y) {
+  # turn x to a character, easier to deal with
+  x = as.character(x)
+  # shuffle the x values:
+  x_shuff = sample(x)
+  # calculate the mean of each group:
+  x_bar_add = mean(y[x_shuff == "1", "preterm"])
+  x_bar_ctl = mean(y[x_shuff == "0", "preterm"])
+  # calculate the difference:
+  x_bar_add - x_bar_ctl
+  
+}
+
+perm(z_y_week_12$week_12_cluster_10, z_y_week_12)
+
+# Note: this just obtains p-values for differences between individual-level outcomes
+# the chunk below uses the individual-level permutations to simulate MC
+p_res = data.frame()
+
+# for weeks 1:45, use columns 4:48
+for (i in 4:48){
+  
+  pt_week <- z_y |>
+    dplyr::select(c(i, "preterm")) |>
+    mutate(preterm = ifelse(preterm == "preterm", 1, 0))
+  
+  names(pt_week) <- c("cluster_week", "preterm")
+  
+  pt_week <- pt_week |>
+    mutate(cluster_week = ifelse(cluster_week == 10, 1, 0))
+  
+  obs_diff = mean(pt_week[which(pt_week$cluster_week == 1), "preterm"]) -
+    mean(pt_week[which(pt_week$cluster_week != 1), "preterm"])
+  
+  null_diff = replicate(n = 1000, expr = perm(pt_week$cluster_week, pt_week))
+  
+  hist(null_diff, col = "grey")
+  abline(v = obs_diff, col = "blue", lwd = 3, lty = 2)
+  
+  table(null_diff > obs_diff)
+  
+  p_val = mean(abs(null_diff) >= obs_diff) # two-tailed p-value
+  print(p_val)
+  
+  p_res <- rbind(p_res,
+                 c(paste0("week_", i - 3),
+                   p_val))
+}
+
+head(p_res)
+# again — it's not the SIR, so let's create that permutation
+```
+
+```{r}
+#########
+# SIR monte-carlo
+#########
+
+# function to create permuted cluster assignments and calculate the SIR for each week
+perm_cluster <- function(y) { # takes data
+  
+  dt_res_mc = data.frame()
+  
+  for (i in 4:48){
+    
+    x = as.character(y[, i])
+    # shuffle the x values:
+    x_shuff = sample(x)
+    
+    dt_temp = data.frame(table(x_shuff, y$preterm)) # put the outcome here
+    #dt_temp$Var1 = names(z_sga)[i]
+    #dt_temp$Var2 = names(z_sga)[i + 1]
+    dt_temp$week <- paste(names(y)[i])
+    
+    dt_res_mc = rbind(dt_res_mc, dt_temp)
+    
+  }
+  
+  dt_temp = data.frame(table(x_shuff, y$preterm)) # outcome
+  dt_temp$week <- paste(names(y)[i])
+  
+  # dt_res_mc = rbind(dt_res_mc, dt_temp)
+  
+  names(dt_res_mc) <- c("cluster_mc", "y", "freq", "week")
+  # print(table(dt_res_mc$cluster_mc))
+  
+  # cluster 0 means you weren't pregnant in that week; remove
+  dt_res_mc <- dt_res_mc |>
+    filter(!cluster_mc == 0)
+  
+  # SIR
+  dt_res_mc$target_cluster <- ifelse(dt_res_mc$cluster_mc == 10, 
+                                  "target_cluster", "other_cluster")
+  
+  dt_res_wide_mc <- dt_res_mc |>
+    tidyr::pivot_wider(id_cols = c(cluster_mc, target_cluster), 
+                       names_from = c(y, week), 
+                values_from = freq)
+  
+  # print(head(dt_res_wide_mc))
+  
+  target_cluster_mc <- data.frame()
+  
+  for(i in seq(from = 3, to = 92, by = 2)) {
+    var_app <- i
+    var_sm <- i + 1
+    
+    res_mc <- dt_res_wide_mc[, c(2, var_app, var_sm)]
+    
+    res_mc$pop <- rowSums(res_mc[2:3])
+    
+    names(res_mc) <- c("cluster", "hyp", "no", "pop")
+    
+    E <- expected(
+      population = res_mc$pop,
+      cases = res_mc$hyp,
+      n.strata = 1
+    )
+    
+    res_mc$E <- E
+    res_mc$SIR <- res_mc[, "hyp"] / res_mc[, "E"]
+    
+    res_mc$week <- str_sub(names(dt_res_wide_mc)[i + 1], 
+                           start = (nchar(names(dt_res_wide_mc)[i + 1])-1),
+                           end = nchar(names(dt_res_wide_mc)[i + 1]))
+    res_mc$week <- gsub("_", "", res_mc$week)
+    res_mc$week <- as.numeric(res_mc$week)
+    
+    target_cluster_mc <- rbind(target_cluster_mc, res_mc)
+    
+  } 
+  
+  target_cluster_mc_sir <- target_cluster_mc |>
+    filter(cluster == "target_cluster")
+  
+  target_cluster_mc_sir$SIR <- target_cluster_mc_sir$SIR$hyp
+  
+  target_cluster_mc_sir[, c("SIR")]
+  
+}
+
+# this is one MC simulation:
+test <- perm_cluster(z_y)
+
+## 1000 MC simularions:
+# null_diff <- replicate(n = 1000, expr = perm_cluster(z_y))
+# null_diff_cl <- map_df(null_diff, ~as.data.frame(t(.)))
+
+### aside: can we parallelize this^
+library(future.apply)
+plan(multisession, workers = (detectCores() - 1))
+
+system.time(
+  y <- future_replicate(1000, perm_cluster(z_y))
+)
+# yes we can. takes about 2.5m
+
+# each row is one MC run
+# each column is one week
+null_diff_cl <- map_df(y, ~as.data.frame(t(.)))
+
+obs_SIR <- cluster_5_only$SIR$hyp[1]
+
+# pivot, for facet plot
+null_diff_cl_long <- null_diff_cl |>
+  pivot_longer(V1:V45) |>
+  rename(week = name) |>
+  mutate(week = as.numeric(
+    gsub("V", "", week)))
+
+# observed SIR for each week
+cluster_5_only$SIR <- cluster_5_only$SIR$hyp
+
+# combine, to plot both
+mc_obs <- merge(null_diff_cl_long, cluster_5_only, by = "week")
+
+ggplot(mc_obs, aes(x = value)) +
+  geom_histogram() +
+  facet_wrap(~ week) +
+  geom_vline(data = . |> group_by(week) |> 
+               summarise(avg_sir=mean(SIR)), 
+             aes(xintercept=avg_sir))
+
+# snag p-values
+for(i in 1:length(names(null_diff_cl))) {
+  print( paste0("week_", i, ": ",
+    mean(abs(null_diff_cl[, i]) >= cluster_5_only[which(cluster_5_only$week == i), "SIR"]))
+  )
+}
+
+
+
+```
+
+Confidence interval calculation
+
+```{r}
+
+##
+
+
+```
+
+
+
+q
+- if we used only one component of the mixture (average exposure in cluster relative to average exposure outside the cluster), would we see the same relationship? does the mixture capture what's missing?
+    - if there's a cluster mainly made up of one pollutant?
+
+
+
+
+
