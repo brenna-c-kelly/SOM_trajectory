@@ -1,0 +1,163 @@
+---
+title: "03_cox model"
+author: "Brenna Kelly"
+date: "2025-06-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+```{r}
+
+
+library(dplyr)
+library(purrr)
+library(regclass)
+library(data.table)
+
+# OG
+full_dat <- read.csv("data/clean_birth_data.csv")
+# outcome: placental insufficiency
+full_dat$hypertension_code <- ifelse(full_dat$hypertension %in% c("C", "E", "H", "P"),
+                                     "hyp", "no")
+full_dat$pl_insuf <- case_when(full_dat$sga10_by_sex > full_dat$birthweightgrams ~ 1, # sga
+                               full_dat$hypertension %in% c("H", "E", "P") ~ 1)
+full_dat$pl_insuf <- ifelse(is.na(full_dat$pl_insuf), 0, 1)
+
+# outcome: gestational hypertension
+full_dat$gestational_hyp <- ifelse(full_dat$hypertension %in% c("H", "E", "P"), 1, 0)
+
+# outcome: gestational diabetes
+full_dat$gestational_diab <- ifelse(full_dat$gestationaldiabetes == 1, 1, 0)
+
+# outcome: preterm birth
+full_dat$preterm <- ifelse(full_dat$gestation < 34, "preterm", "term")
+full_dat$preterm_code <- ifelse(full_dat$preterm == "preterm", 1, 0)
+
+# outcome: very preterm birth
+full_dat$very_preterm <- ifelse(full_dat$gestation < 30, "preterm", "term")
+
+# *negative control* outcome: gender
+full_dat$gender_code <- ifelse(full_dat$gender == "M", 1, 0)
+
+# grab confounders
+dat <- fread("/Users/brenna/Downloads/birth_exposures_with_confounders.csv")
+
+confounders <- dat[, c("momid", "grid_id", "gestation", "birthccyy", "birthmm", 
+                       "mommedicaid_char", "mommaritalstatus_char",
+                       "momwic_char", "momeducation_char", "momage",
+                       "poverty_rate")]
+rm(dat)
+
+# and a few more
+mom <- read.csv('../../data/health data/births.csv')
+mom_2013 <- fread('/Users/brenna/Downloads/births 2013+.csv')
+mom_2016 <- fread('/Users/brenna/Downloads/births 2016+.csv')
+
+mom <- rbind(mom_2013, mom_2016)
+
+mom <- mom |>
+  mutate(MomHeightFeet = as.numeric(MomHeightFeet),
+         MomHeightFeet = ifelse(MomHeightFeet == 1, NA, MomHeightFeet),
+         MomHeightInches = as.numeric(MomHeightInches),
+         race_ethn = case_when(MomHispanicOrigin == 1 | MomHispanicMex == 1 |
+                                 MomHispanicCuban == 1 | MomHispanicPuertoRican == 1 |
+                                 MomHispanicOther == 1 | MomHispanicOtherSpec != "" |
+                                 !MomHispanicOtherSpec %in% c("*", "") ~ # primacy
+                                 "hispanic",
+                               MomRaceWhite == 1 ~ "white",
+                               MomRaceBlack == 1 ~ "black",
+                               MomRaceAmIndian == 1 ~ "amindian",
+                               MomRaceChinese == 1 | MomRaceJapanese == 1 |
+                                 MomRaceFilipino == 1 | MomRaceOtherAsian == 1 |
+                                 MomRaceAsianIndian == 1 | MomRaceKorean == 1 |
+                                 MomRaceVietnamese == 1 ~ "asian",
+                               MomRaceHawaiian == 1 | MomRaceSamoan == 1 |
+                                 MomRaceGuamanian == 1 | MomRacePacIslander == 1 |
+                                 MomRaceTongan == 1 ~ "nhopi",
+                               MomRaceOther == 1 | MomRaceOtherSpec1 == 1 |
+                                 MomRaceOtherSpec2 == 1 | MomRaceUnknown == 1 ~ "other"),
+         race_ethn = ifelse(is.na(race_ethn), "other", race_ethn),
+         # there's one maternal_wt = 550; 
+         # this could be a recording error, but it's prior to 2013 so don't bother with it
+         MomWeightPrior = as.numeric(MomWeightPrior),
+         # bmi = ((lbs * 703) / inches) / inches
+         mom_bmi = ((MomWeightPrior * 703) / 
+                      (12 * MomHeightFeet + MomHeightInches)) / 
+           (12 * MomHeightFeet + MomHeightInches))
+
+names(mom) <- tolower(names(mom))
+mom <- mom[, c("momid", "birthccyy", "birthmm",
+               "race_ethn")] #, "mom_bmi", "momheightfeet",
+               #"momheightinches", "momweightprior"
+               # note: too much missing in BMI
+mom$momid <- as.numeric(mom$momid)
+
+# and a couple more
+table(full_dat[, c("prevpregnowliving", "prevpregnowdead", "prevpregstillborn")])
+# none — these were excluded; our cohort is nulligravida (as far as we know)
+
+# birth data
+full_dat <- merge(full_dat, mom, by = c("momid", "birthccyy", "birthmm"))
+z <- read.csv("data/birth_traj_trunc_jun08.csv")
+
+z_y <- merge(z, full_dat[, c("momid", "grid_id", "birthccyy", "birthmm",
+                             "sga", "hypertension_code",
+                             "pl_insuf", "preterm", "preterm_code",
+                             "gestational_hyp", "very_preterm",
+                             "gestational_diab", "gender_code",
+                             "race_ethn")], 
+             by = c("momid", "grid_id")) # N = 44984
+
+dat_con <- merge(z_y, confounders, by = c("momid", "grid_id", 
+                                          "birthccyy", "birthmm"))
+
+dat_con$poverty_rate <- ifelse(is.na(dat_con$poverty_rate), 0, dat_con$poverty_rate)
+dat_con$poverty_rate_sc <- (dat_con$poverty_rate - mean(dat_con$poverty_rate)) / 10
+
+
+```
+
+
+## Cox model
+
+```{r}
+
+library(survival)
+library(survminer)
+
+head(dat_con)
+
+recode_fx <- function(x) {
+  x = case_when(x == 10 ~ "1",
+                x == 0 ~ "rm")
+  x = ifelse(is.na(x), "0", x)
+  return(x)
+}
+
+head(dat_con)
+
+res.cox <- coxph(Surv(gestation, 
+                      preterm_code) ~ 1, data = dat_con)
+res.cox
+
+
+?coxph
+
+dat_10 <- dat_con |>
+  mutate(across(week_1:week_33, ~ recode_fx(.)))
+
+summary(dat_10)
+
+res.cox(gestation)
+
+```
+
+
+
+

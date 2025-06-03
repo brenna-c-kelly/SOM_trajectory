@@ -19,7 +19,10 @@ library(dplyr)
 library(purrr)
 library(ggplot2)
 library(stringr)
+library(rsample)
+library(parallel)
 library(SpatialEpi)
+library(future.apply)
 # library(data.table)
 
 ```
@@ -144,13 +147,102 @@ full_dat$gender_code <- ifelse(full_dat$gender == "M", 1, 0)
 
 
 # combine outcome and exposures (clusters)
-z_y <- merge(z, full_dat[, c("momid", "grid_id", 
+z_y <- merge(z, full_dat[, c("momid", "grid_id", "sga", "hypertension_code",
                              "pl_insuf", "preterm", "preterm_code",
                              "gestational_hyp", "very_preterm", #"sga_code",
                              "gestational_diab", "gender_code")], 
              by = c("momid", "grid_id"))
+# note, ^this removes 10,572 pregnancies with gestation weeks outside the 2013-2016 period
 
 ```
+
+### table 1
+
+```{r}
+
+#### stacked barplot
+turbo_pal <-  c("white", "#30123BFF", "#4454C4FF", "#4490FEFF", 
+                "#1FC8DEFF", "#29EFA2FF", "#BE2102FF","#FE922AFF", "#7DFF56FF",
+                  "#7A0403FF","#EA4F0DFF", "#C1F334FF", "#F1CA3AFF")
+
+
+
+z_y |>
+  pivot_longer(cols = 4:48) |>
+  rename(week = name,
+         cluster = value) |>
+  mutate(week = as.numeric(
+    gsub("week_", "", week))) |>
+  mutate(cluster = as.factor(cluster)) |>
+  arrange(week) |>
+  # mutate(cluster = ifelse(cluster == 0, 13, cluster)) |>
+  # mutate(cluster_10 = ifelse(cluster == 10, 1, 0)) |>
+  group_by(week, cluster) |> 
+  summarize(n = n()) |>
+  ungroup() |>
+  arrange(cluster) |>
+  ggplot(aes(fill = cluster, y = n, x = week)) + 
+  geom_bar(position = "stack", stat = "identity", width = 1) +
+  scale_fill_manual(values = turbo_pal) +
+  theme_classic()
+
+cluster_counts <- z_y |>
+  mutate(pregnancy_id = paste0(momid, row_number())) |>
+  pivot_longer(cols = 4:48) |>
+  rename(week = name,
+         cluster = value) |>
+  mutate(week = as.numeric(
+    gsub("week_", "", week))) |>
+  mutate(cluster = as.factor(cluster)) |>
+  arrange(week) |>
+  # mutate(cluster = ifelse(cluster == 0, 13, cluster)) |>
+  # mutate(cluster_10 = ifelse(cluster == 10, 1, 0)) |>
+  group_by(pregnancy_id, preterm) |> 
+  summarize(n = length(unique(cluster)))
+
+# z_y <- merge(z_y, cluster_counts, by = "momid")
+cluster_counts[which(cluster_counts$n > 11), "momid"]
+
+z_y_clcount <- z_y |>
+  mutate(pregnancy_id = paste0(momid, row_number())) |>
+  merge(cluster_counts[, c("pregnancy_id", "n")], by = "pregnancy_id")
+
+head(z_y_clcount)
+
+
+aggregate(cluster_counts$n, by = list(cluster_counts$preterm), FUN = mean)
+aggregate(cluster_counts$n, by = list(cluster_counts$preterm), FUN = sd)
+
+mean(cluster_counts$n)
+sd(cluster_counts$n)
+library(moments)
+hist(cluster_counts$n)
+skewness(cluster_counts$n)
+
+head(z_y)
+
+
+library(tableone)
+
+head(z_y)
+
+tab1 <- CreateTableOne(vars = c("n"), 
+                       strata = c("preterm"), data = z_y_clcount,
+                       testNonNormal = kruskal.test)
+tab1
+
+
+cluster_3 <- z_y |>
+  filter(week_1 == 3)
+head(cluster_3)
+
+
+
+
+
+```
+
+
 
 ### aggregating number of disease/disease-free by exposure-week
 
@@ -249,7 +341,7 @@ abline(h = 1, lty = 2)
 
 ```{r}
 
-library(rsample)
+# library(rsample)
 set.seed(4325)
 
 # testing, just for a single week and cluster
@@ -257,18 +349,6 @@ z_y_week_12 <- z_y |>
   dplyr::select(c("week_12", "preterm")) |>
   mutate(cluster_week = ifelse(week_12 == 10, 1, 0)) |>
   mutate(preterm = ifelse(preterm == "preterm", 1, 0))
-
-perm(z_y_week_12$cluster_week, z_y_week_12)
-
-Dnull = replicate(n = 5000, expr = perm(z_y_week_12$cluster_week, z_y_week_12))
-
-Dobs = mean(z_y_week_12[z_y_week_12$cluster_week == "1", "preterm"]) - mean(z_y_week_12[z_y_week_12$cluster_week == "0", "preterm"])
-
-hist(Dnull, col = "grey")
-abline(v = Dobs, col = "blue", lwd = 3, lty = 2)
-
-table(Dnull > Dobs) # 2 in 5000
-mean(abs(Dnull) >= Dobs) # p = 8e-0.4 for week 12
 
 # writing a function, to scale this up for all weeks
 perm = function(x, y) {
@@ -283,6 +363,20 @@ perm = function(x, y) {
   x_bar_add - x_bar_ctl
   
 }
+
+perm(z_y_week_12$cluster_week, z_y_week_12)
+
+Dnull = replicate(n = 1000, expr = perm(z_y_week_12$cluster_week, z_y_week_12))
+
+Dobs = mean(z_y_week_12[z_y_week_12$cluster_week == "1", "preterm"]) - mean(z_y_week_12[z_y_week_12$cluster_week == "0", "preterm"])
+
+summary(Dnull)
+
+hist(Dnull, col = "grey")
+abline(v = Dobs, col = "blue", lwd = 3, lty = 2)
+
+table(Dnull > Dobs) # 2 in 5000
+mean(abs(Dnull) >= Dobs) # p = 8e-0.4 for week 12
 
 perm(z_y_week_12$week_12_cluster_10, z_y_week_12)
 
@@ -326,7 +420,7 @@ head(p_res)
 
 ```{r}
 #########
-# SIR monte-carlo
+# SIR permutation
 #########
 
 # function to create permuted cluster assignments and calculate the SIR for each week
@@ -420,7 +514,7 @@ test <- perm_cluster(z_y)
 # null_diff_cl <- map_df(null_diff, ~as.data.frame(t(.)))
 
 ### aside: can we parallelize this^
-library(future.apply)
+
 plan(multisession, workers = (detectCores() - 1))
 
 system.time(
@@ -432,7 +526,7 @@ system.time(
 # each column is one week
 null_diff_cl <- map_df(y, ~as.data.frame(t(.)))
 
-obs_SIR <- cluster_5_only$SIR$hyp[1]
+# obs_SIR <- cluster_5_only$SIR$hyp[1]
 
 # pivot, for facet plot
 null_diff_cl_long <- null_diff_cl |>
@@ -473,6 +567,14 @@ Confidence interval calculation
 
 ```{r}
 
+randomize = function(dat) {
+  # number of observed pairs
+  n = nrow(dat)
+  # sample the rows to determine which will be kept
+  keep = sample(x = 1:n, size = n, replace = T)
+  # retreive these rows from the data
+  dat[keep, ]
+}
 
 perm_ci <- function(dat) {
   dt_res_ci = data.frame()
@@ -560,7 +662,7 @@ perm_ci(z_y)
 plan(multisession, workers = (detectCores() - 1))
 
 system.time(
-  sir_ci <- future_replicate(1000, perm_ci(z_y))
+  sir_ci <- future_replicate(5000, perm_ci(z_y))
 )
 
 # each row is one MC run
@@ -568,11 +670,6 @@ system.time(
 sir_ci_mc <- map_df(sir_ci, ~as.data.frame(t(.)))
 head(sir_ci_mc)
 
-
-for(i in 1:ncol(sir_ci_mc)) {
-  mean(sir_ci_mc[, i], na.rm = TRUE)
-  quantile(sir_ci_mc[, i], c(0.025, 0.975), na.rm = TRUE)
-}
 
 ci <- data.frame()
 # snag confidence intervals
@@ -596,9 +693,12 @@ ggplot(cluster_5_ci, aes(x = week, y = SIR)) +
 ggplot(cluster_5_ci, aes(x = week, y = SIR)) +
   geom_point() +
   geom_linerange(aes(ymin = bs_lower, ymax = bs_upper)) +
-  geom_hline(yintercept = 1, style = 'dotted') +
-  theme_classic()
+  geom_hline(yintercept = 1) +
+  theme_classic() +
+  ggtitle("11, gestational hypertension")
 
+#
+write.csv(cluster_5_ci, "SIR_cluster_10_preterm_ci.csv", row.names = FALSE)
 
 ```
 
@@ -608,14 +708,7 @@ ggplot(cluster_5_ci, aes(x = week, y = SIR)) +
 ```{r}
 
 # 
-# randomize = function(dat) {
-#   # number of observed pairs
-#   n = nrow(dat)
-#   # sample the rows to determine which will be kept
-#   keep = sample(x = 1:n, size = n, replace = T)
-#   # retreive these rows from the data
-#   dat[keep, ]
-# }
+
 # 
 # nrow(setdiff(z_y, randomize(z_y)))
 # 
