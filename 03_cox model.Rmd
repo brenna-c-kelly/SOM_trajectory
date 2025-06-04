@@ -10,8 +10,6 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 
-
-
 ```{r}
 
 
@@ -140,23 +138,271 @@ recode_fx <- function(x) {
   return(x)
 }
 
-head(dat_con)
+dat_10 <- dat_con |>
+  mutate(across(week_1:week_45, ~ recode_fx(.)))
 
-res.cox <- coxph(Surv(gestation, 
-                      preterm_code) ~ 1, data = dat_con)
-res.cox
+for(j in 1:33) {
+    j = j + 5
+    
+    dat_10 <- dat_10 |>
+      filter(dat_10[, j] != "rm")
+}
+
+dat_10 <- dat_10 |>
+  mutate(across(week_1:week_44, ~relevel(as.factor(.), ref = "0")))
+# week 45 has no = 0
+
+table(dat_10$week_32)
+```
+
+
+
+```{r}
+
+glm(gestation ~ week_11*week_12, data = dat_10)
+
+# null model
+res.cox <- coxph(Surv(gestation, preterm_code) ~ 
+                   1, data = dat_10)
+
+summary(res.cox)
+
+km <- list()
+
+km[[1]] <- ggsurvplot(survfit(res.cox, data = dat_10), palette = "#2E9FDF",
+                      ggtheme = theme_minimal(), ylim = c(0.75, 1))
+
+# with confounders
+res.cox_c <- coxph(Surv(gestation, preterm_code) ~ poverty_rate_sc + 
+                     momage + momeducation_char + race_ethn, 
+                   data = dat_10)
+
+summary(res.surv_c)
+
+km[[2]] <- ggsurvplot(survfit(res.cox_c, data = dat_10), palette = "purple",
+                      ggtheme = theme_minimal(), ylim = c(0.75, 1))
+
+# plot the null and confounder model together
+arrange_ggsurvplots(km)
+?arrange_ggsurvplots
+
+# survival curve with just one confounder, to plot
+res.surv_c <- survfit(Surv(gestation, preterm_code) ~ race_ethn, 
+                      data = dat_10)
+
+# without CI
+ggsurvplot(res.surv_c, data = dat_10, palette = "Dark2",
+           ggtheme = theme_minimal(), 
+           ylim = c(0.93, 1))
+# with CI, just two groups
+dat_f <- dat_10 |>
+  filter(race_ethn %in% c("white", "nhopi"))
+survfit(Surv(gestation, preterm_code) ~ race_ethn, data = dat_f) |>
+  ggsurvplot(data = dat_10, palette = "Dark2",
+           ggtheme = theme_minimal(), 
+           ylim = c(0.93, 1), conf.int = TRUE)
+
+
+?ggsurvplot
+
+?coxph
 
 
 ?coxph
 
-dat_10 <- dat_con |>
-  mutate(across(week_1:week_33, ~ recode_fx(.)))
 
 summary(dat_10)
 
 res.cox(gestation)
 
 ```
+
+## aside: gestational hypertension
+
+```{r}
+
+
+
+# with confounders
+res.cox_c <- coxph(Surv(gestation, preterm_code) ~ 
+                     week_1 + week_2 + week_3 +
+                     week_4 + week_5 + week_6 +
+                     week_7 + week_8 + week_9 +
+                     week_10 + week_11 + week_12 +
+                     week_13 + week_14 + week_15 +
+                     week_16 + week_17 + week_18 +
+                     week_19 + week_20 + week_21 +
+                     week_22 + week_23 + week_24 +
+                     week_25 + week_26 + week_27 +
+                     week_28 + week_29 + week_30 +
+                     week_31 + week_32 + week_33, 
+                   data = dat_10)
+
+summary(res.cox_c)
+
+VIF(res.cox_c) # bit of multicollinearity
+
+ggsurvplot(survfit(res.cox_c, data = dat_10), palette = "#2E9FDF",
+                      ggtheme = theme_minimal(), ylim = c(0.99, 1),
+           conf.int = TRUE)
+
+survfit(Surv(gestation, preterm_code) ~ week_1 + week_2 + week_3 +
+                     week_4 + week_5 + week_6 +
+                     week_6 + week_7 + week_9 +
+                     week_10 + week_11 + week_12 +
+                     week_13 + week_14 + week_15 +
+                     week_16 + week_17 + week_18 +
+                     week_19 + week_20 + week_21 +
+                     week_22 + week_23 + week_24 +
+                     week_25 + week_26 + week_27 +
+                     week_28 + week_29 + week_30 +
+                     week_31 + week_32 + week_33, 
+                   data = dat_10) |>
+  ggsurvplot(data = dat_10, palette = "Dark2",
+           ggtheme = theme_minimal(), 
+           ylim = c(0.90, 1), conf.int = TRUE)
+
+summary(dat_con)
+
+
+```
+
+## trying a glm with time-to-event structure
+
+```{r}
+
+library(tidyr)
+library(stringr)
+library(performance)
+
+# check for zero inflation
+check_zi <- glm(preterm_code ~ 1,
+                data = dat_10,
+                family = "binomial")
+
+summary(check_zi)
+
+check_zeroinflation(
+  glm(preterm_code ~ 1,
+      data = dat_10,
+      family = "binomial"))
+
+
+dat_10_long <- dat_10 |>
+  pivot_longer(week_1:week_45, names_to = "exposure_week", 
+               values_to = "cluster_10") |>
+  # remove "rm", as the exposure does not exist (exposure occurs after event)
+  filter(cluster_10 != "rm")
+
+head(dat_10_long)
+
+
+#zeroinfl
+
+test <- dat_10_long |>
+  filter(exposure_week %in% c("week_10", "week_11", "week_12"))# |>
+  # mutate(cluster_10 = as.numeric(cluster_10)) |>
+  # mutate(exposure_week = as.numeric(
+  #   str_replace(exposure_week, "week_", "")
+  # ))
+
+test_2 <- dat_10_long |>
+  mutate(week = as.numeric(
+    str_replace(exposure_week, "week_", ""))) |>
+  filter(!week %in% as.character(c(34:45)))
+
+library(lme4)
+library(INLA)
+
+table(test_2$week)
+
+test_2$momid <- as.factor(test_2$momid)
+
+system.time(
+  test_glm_cr <- inla(preterm_code ~ f(momid, model = "iid") + cluster_10*exposure_week +
+                  poverty_rate_sc + 
+                    momage + momeducation_char + race_ethn,
+                  data = test_2, family = "binomial",
+                  control.compute = list(dic = TRUE, waic = TRUE),
+                  control.inla = list(int.strategy = "eb"),
+                  verbose = FALSE)
+)
+
+
+summary(test_glm) # without confounders or random effect
+summary(test_glm_c) # confounders
+summary(test_glm_cr) # confounders, glmer with random effect for momid
+# note, the glmer takes much much longer to run
+# of course — inla
+
+res <- data.frame(variable = names(test_glm_cr$coefficients),
+                  values = test_glm_cr$coefficients)
+rownames(res) <- NULL
+
+res
+
+
+
+str(data.frame(rownames(data.frame(test_glm_c$coefficients))))
+
+VIF(glm(preterm_code ~ cluster_10 + exposure_week,
+                data = test_2,
+                family = "binomial"))
+# no multicollinearity; GVIF < 1.004 
+
+
+VIF(test_glm)
+
+table(test$exposure_week)
+
+summary(test_glm)
+VIF(test_glm)
+
+```
+
+
+## cox it with time-varying exposure
+
+```{r}
+
+# install.packages("timereg")
+# library(timereg)
+
+# fit_time <- timecox(Surv(gestation, preterm) ~ const(poverty_rate_sc) + 
+#                   const(momage) + const(momeducation_char) + const(race_ethn),
+#                   max.time = 33, data = dat_10)
+
+# start-stop format for time-varying covariates
+# according to: https://stats.oarc.ucla.edu/wp-content/uploads/2025/02/survival_r_full.html
+# - start and stop are time variables
+#     - note that the left time point is exclusive and the right time point is inclusive
+#     - i.e., A = (0, 3], B = (3, 4]
+#     - This means the status is A for time steps 1, 2, 3 and B for step 4
+# - event is the status variable
+# each individual will have as many rows as they have changes in status + 1 (i.e, cluster assignment)
+
+
+# sound easy? well try restructuring the data
+dat_10
+
+
+
+res.cox_c <- coxph(Surv(gestation, cluster) ~ 
+                     week_1 + week_2 + week_3 +
+                     week_4 + week_5 + week_6 +
+                     week_7 + week_8 + week_9 +
+                     week_10 + week_11 + week_12 +
+                     week_13 + week_14 + week_15 +
+                     week_16 + week_17 + week_18 +
+                     week_19 + week_20 + week_21 +
+                     week_22 + week_23 + week_24 +
+                     week_25 + week_26 + week_27 +
+                     week_28 + week_29 + week_30 +
+                     week_31 + week_32 + week_33, 
+                   data = dat_10)
+
+```
+
 
 
 
