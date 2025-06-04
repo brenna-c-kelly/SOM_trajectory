@@ -383,9 +383,110 @@ VIF(test_glm)
 
 
 # sound easy? well try restructuring the data
-dat_10
+tv_test <- dat_10_long[, c("momid", "grid_id", "exposure_week", "cluster_10")]
 
 
+tv_list <- list()
+
+start_time <- Sys.time()
+
+for(i in 1:length(unique(tv_test$momid))) {
+  
+  ids <- unique(tv_test$momid)
+  
+  sm_tv <- tv_test |>
+    filter(momid == ids[i])
+  
+  sm_rle <- rle(sm_tv$cluster_10)
+  
+  sm_rle <- cbind(sm_tv[length(sm_rle[[1]]), # number of status changes + 1
+                        c("momid", "grid_id")], # maternal characteristics
+                  int = sm_rle[[1]], # interval length
+                  status = sm_rle[[2]]) # status
+  
+  sm_rle$start <- shift(cumsum(sm_rle$int), type = "lag")
+  sm_rle$end <- cumsum(sm_rle$int)
+  sm_rle[1, "start"] <- 0
+  
+  sm_rle <- sm_rle |>
+    select(!int)
+  
+  tv_list[[i]] <- sm_rle
+  
+}
+
+end_time <- Sys.time()
+end_time - start_time
+# not so bad; a bit time intensive with the loop (53m) but works
+
+tv_dat <- map_df(tv_list, ~as.data.frame(.))
+head(tv_dat)
+
+
+
+sm_test <- tv_test[which(tv_test$momid %in% c(100828549)),]#, 602869072)), ]
+
+
+sm_rle <- rle(sm_test$cluster_10)
+
+length(sm_rle[[1]])
+
+sm_rle <- cbind(sm_test[length(sm_rle[[1]]), # number of status changes + 1
+                        c("momid", "grid_id")], # maternal characteristics
+                int = sm_rle[[1]], # interval length
+                status = sm_rle[[2]])#,
+                # start = rep(0, length = length(sm_rle[[1]]))) # statuses
+head(sm_rle)
+# sm_rle$start = sm_rle$int
+# sm_rle[1, "start"] <- 0
+# sm_rle[1, "end"] <- sm_rle[1, "int"]
+sm_rle$start <- shift(cumsum(sm_rle$int), type = "lag")
+sm_rle$end <- cumsum(sm_rle$int)
+sm_rle[1, "start"] <- 0
+# sm_rle[1, "end"] <- sm_rle[1, "end"]
+
+# sm_rle$start <- shift(sm_rle$start) + sm_rle$int#, type = "lag")
+# sm_rle$end = shift(sm_rle$end, type = "lag") + 1
+
+# cumsum(sm_rle$start)
+
+### using run length encoding
+
+for(i in unique(sm_test$momid)) {
+  
+  sm_test_rle <- sm_test |>
+    filter(momid == i)
+  
+  rle(sm_test$cluster_10)
+  
+}
+
+
+
+
+ananda <- function(y) {
+    sequence(rle(y)$lengths)
+}
+
+
+sequence(rle(sm_test)$lengths)
+?rle
+
+require(microbenchmark)
+
+microbenchmark(a1 <- arun(sm_test), a2 <- ananda(sm_test), times = 100)
+
+sm_test <- sm_test |>
+  group_by(cluster_10) |>
+  mutate(names = case_when(week == min(week) ~ "start",
+                           week == max(week) ~ "end"))
+
+sm_test[, .q(seq, maxseq) := .(1 : .N, .N),
+       by=momid][
+       seq == maxseq & day < 4,]
+
+
+length(unique(sm_test$cluster_10, sm_test$momid))
 
 res.cox_c <- coxph(Surv(gestation, cluster) ~ 
                      week_1 + week_2 + week_3 +
