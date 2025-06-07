@@ -249,17 +249,17 @@ inla_results
 
 ```{r}
 ### plotting hyperparameters
-
-
-for(i in inla_models) {
-  
-  return(plot(res_1, plot.fixed.effects = FALSE,
-              plot.random.effects = FALSE,
-              plot.hyperparameters = TRUE,
-              plot.predictor = FALSE, cex = 1.25))
-  
-}
-
+# 
+# 
+# for(i in inla_models) {
+#   
+#   return(plot(res_1, plot.fixed.effects = FALSE,
+#               plot.random.effects = FALSE,
+#               plot.hyperparameters = TRUE,
+#               plot.predictor = FALSE, cex = 1.25))
+#   
+# }
+# 
 
 ```
 
@@ -267,7 +267,13 @@ for(i in inla_models) {
 
 ```{r}
 
-ggplot(cl_1, aes(x = week, y = or)) +
+## plot of all ORs
+
+cl_results <- map_df(inla_results, ~as.data.frame(.))
+
+cl_results$cluster <- as.factor(cl_results$cluster)
+
+cl_plt <- ggplot(cl_results, aes(x = week, y = or)) +
   geom_point() +
   geom_linerange(aes(ymin = lwr, ymax = upr)) +
   geom_hline(yintercept = 1) +
@@ -275,12 +281,256 @@ ggplot(cl_1, aes(x = week, y = or)) +
   ggtitle("Cluster 1 Exposure") +
   ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
   xlab("Exposure Week") +
+  ylim(0.25, 2.5) +
   theme_classic() +
   theme(axis.title.y = element_text(angle = 0, vjust = 0.6, hjust = 1)) +
   facet_wrap(~cluster)
 
+cl_plt
+
+names(cl_results)
+
+
+## what is the critical window for cluster 5?
+cl_results |>
+  filter(cluster == 5)
+# ~ weeks 24-29
+## what is the critical window for cluster 10?
+cl_results |>
+  filter(cluster == 10)
+# ~ weeks 9-13
+### use this for the duration models
+
 
 ```
+
+
+```{r}
+
+## are there significant (ala bonferroni) results anywhere?
+
+table(cl_results$bonferroni)
+
+cl_results[which(cl_results$bonferroni == "significant"), ]
+
+
+```
+
+### levels of preterm  
+Late preterm (>37 weeks) is more likely to be medically indicated. Let's see if there is an association between cluster 5, which is associated with increased risk of preterm birth when exposed in week 28, and varying levels of preterm. Also comparing with cluster 10, which is associated with increased risk of preterm birth during late-first and early-second trimesters.  
+
+```{r}
+
+dat_con$ptb_class <- case_when(dat_con$gestation <= 28 ~ "early preterm",
+                               dat_con$gestation <= 34 ~ "preterm",
+                               dat_con$gestation <= 37 ~ "late preterm",
+                               dat_con$gestation > 37 ~ "term")
+
+table(dat_con$ptb_class, dat_con$week_28)
+# first thought — it looks like late preterm is more common everywhere, but maybe (?) more common with cluster 5 exposure in week 28
+#     just a note, in case we forgot — pregnancies are only include up until birth
+prop.table(table(dat_con$ptb_class, dat_con$week_28), marg = 2)
+# looks like late preterm birth is (roughly) just as likely when exposed to cluster 5 as any other cluster during week 28 
+# the thought was — is exposure to cluster 5 later in pregnancy caused by different etiology than exposure to cluster 10 earlier in pregnancy
+
+# maybe — is it the combination? is exposure to cluster 10 early associated with exposure to cluster 5 later
+# looking at the plot of exposure over time — it's highly possible, as cluster 5 tends to follow cluster 10 throughout the year
+
+```
+
+
+
+
+```{r}
+
+dat_con$week_11_exp <- relevel(as.factor(
+  ifelse(dat_con$week_11 == 10, "ten", "not ten")), ref = "not ten")
+dat_con$week_28_exp <- relevel(as.factor(
+  ifelse(dat_con$week_28 == 5, "five", "not five")), ref = "not five")
+
+test <- inla(preterm_code ~ week_11_exp*week_28_exp +
+               poverty_rate_sc + race_ethn, 
+             data = dat_long_10, family = "binomial")
+
+# table(dat_con$week)
+
+p_value_function(test$marginals.fixed$`week_11_expten:week_28_expfive`)
+
+summary(test)
+# it looks — maybe — like the combination of 5 and 10 has a large effect, but when we model their combination, 5 does not matter; the effect of 10 is high but not the same as the combination of 10 and 5
+
+# ~ effect of week 11 cluster 10 (maybe.. if I did this right)
+exp(0.219)
+p_value_function(test$marginals.fixed$`week_11_expten`) # definitely not significant at 0.0001 or whatever
+
+```
+
+
+# maybe — make the referent cluster 6; and try everything again, just beginning with cluster 10
+
+```{r}
+
+
+library(survival)
+library(survminer)
+
+head(dat_con)
+
+recode_fx <- function(x) {
+  x = case_when(#x == 10 ~ "1",
+                x == 0 ~ "rm")
+  # x = ifelse(is.na(x), "0", x)
+  return(x)
+}
+
+# dat_10 <- dat_con |>
+#   mutate(across(week_1:week_45, ~ recode_fx(.)))
+
+head(dat_10)
+# for(j in 1:33) {
+    j = j + 5
+
+    dat_10 <- dat_10 |>
+      filter(dat_10[, j] != "rm")
+}
+
+dat_6 <- dat_con |>
+  mutate(across(week_1:week_43, ~relevel(as.factor(.), ref = "6")))
+# week 45 has no = 0
+
+summary(dat_6)
+
+
+
+library(tidyr)
+library(stringr)
+library(performance)
+
+
+dat_6_long <- dat_6 |>
+  pivot_longer(week_1:week_43, names_to = "exposure_week", 
+               values_to = "cluster") |>
+  # remove "rm", as the exposure does not exist (exposure occurs after event)
+  filter(cluster != "rm")
+
+head(dat_6_long)
+
+
+test_6 <- dat_6_long |>
+  mutate(week = as.numeric(
+    str_replace(exposure_week, "week_", ""))) |>
+  filter(!week %in% as.character(c(34:45)))
+
+# only exposures prior to the outcome
+test_6 <- test_6 |>
+  filter(week <= gestation)
+
+
+# test_2[which(test_2$week <= test_2$gestation), ]
+
+# library(lme4)
+# library(INLA)
+
+test_6$momid <- as.factor(test_6$momid)
+
+test_6$race_ethn <- relevel(as.factor(test_6$race_ethn), ref = "white")
+
+system.time(
+  res_0 <- inla(preterm_code ~ #f(momid, model = "iid", hyper = prec.prior) +
+                  cluster*exposure_week +
+                  f(week, model = "rw1") +
+                  poverty_rate_sc +
+                  # momage + momeducation_char + 
+                  race_ethn,
+                data = test_6, family = "binomial",
+                control.predictor = list(compute = T),
+                control.compute = list(dic = TRUE, waic = TRUE),
+                control.inla = list(int.strategy = "eb"),
+                # control.fixed = list(expand.factor.strategy = "inla"),
+                verbose = FALSE)
+)
+
+summary(res_0)
+
+
+
+
+
+#####
+# storing results
+results <- data.frame(variable = rownames(res_0$summary.fixed),
+                      mean = res_0$summary.fixed$mean,
+                      q0.025 = res_0$summary.fixed$`0.025quant`,
+                      q0.975 = res_0$summary.fixed$`0.975quant`)
+
+p_value_function <- function(x) inla.pmarginal(0, x)
+
+results$p_value <- map_df(lapply(res_0$marginals.fixed, 
+                                 p_value_function),
+                          ~as.data.frame(.)) |>
+  rename(p_value = `.`)
+
+head(results)
+
+
+results_10 <- results |>
+    filter(grepl("cluster5", variable) == TRUE)
+
+# tidying
+results_10$variable <- str_replace(results_10$variable, "cluster5:exposure_week", "")
+results_10$variable <- ifelse(results_10$variable == "cluster5", "week_1",
+                           results_10$variable)
+results_10$week <- as.numeric(
+  str_replace(results_10$variable, "week_", ""))
+
+head(results_10)
+
+# bonferroni adjustment
+alpha_level = 0.05 / (33 * 12) # 33 weeks, 12 clusters
+
+results_10$bonferroni <- ifelse(results_10$p_value > alpha_level, "not", "significant")
+table(results_10$bonferroni)
+# not significant, but that's alright; I've always wanted to publish a paper without any "significant" results
+
+# exponentiating
+results_10$or <- exp(results_10$mean)
+results_10$lwr <- exp(results_10$q0.025)
+results_10$upr <- exp(results_10$q0.975)
+
+ref_allelse <- ggplot(results_10, aes(x = week, y = or)) +
+  geom_point() +
+  geom_linerange(aes(ymin = lwr, ymax = upr)) +
+  geom_hline(yintercept = 1) +
+  # facet_wrap(~ cluster, scales = "fixed") +
+  ggtitle("Cluster 10, ref: all") +
+  ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
+  xlab("Exposure Week") +
+  theme_classic() +
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.6, hjust = 1))
+
+
+ref_6 <- cl_results |>
+  filter(cluster == 5) |>
+  ggplot(aes(x = week, y = or)) +
+  geom_point() +
+  geom_linerange(aes(ymin = lwr, ymax = upr)) +
+  geom_hline(yintercept = 1) +
+  # facet_wrap(~ cluster, scales = "fixed") +
+  ggtitle("Cluster 10, ref: 6") +
+  ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
+  xlab("Exposure Week") +
+  theme_classic() +
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.6, hjust = 1))
+
+
+ggarrange(ref_allelse, ref_6)
+
+
+```
+
+
+
+
 
 
 

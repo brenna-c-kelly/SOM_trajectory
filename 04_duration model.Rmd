@@ -1,0 +1,384 @@
+---
+title: "04_duration model"
+author: "Brenna Kelly"
+date: "2025-06-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+```{r}
+
+library(INLA)
+library(tidyr)
+library(dplyr)
+library(purrr)
+library(stringr)
+library(survival)
+library(regclass)
+library(survminer)
+library(data.table)
+library(performance)
+
+# OG
+full_dat <- read.csv("data/clean_birth_data.csv")
+# outcome: placental insufficiency
+full_dat$hypertension_code <- ifelse(full_dat$hypertension %in% c("C", "E", "H", "P"),
+                                     "hyp", "no")
+full_dat$pl_insuf <- case_when(full_dat$sga10_by_sex > full_dat$birthweightgrams ~ 1, # sga
+                               full_dat$hypertension %in% c("H", "E", "P") ~ 1)
+full_dat$pl_insuf <- ifelse(is.na(full_dat$pl_insuf), 0, 1)
+
+# outcome: gestational hypertension
+full_dat$gestational_hyp <- ifelse(full_dat$hypertension %in% c("H", "E", "P"), 1, 0)
+
+# outcome: gestational diabetes
+full_dat$gestational_diab <- ifelse(full_dat$gestationaldiabetes == 1, 1, 0)
+
+# outcome: preterm birth
+full_dat$preterm <- ifelse(full_dat$gestation < 34, "preterm", "term")
+full_dat$preterm_code <- ifelse(full_dat$preterm == "preterm", 1, 0)
+
+# outcome: very preterm birth
+full_dat$very_preterm <- ifelse(full_dat$gestation < 30, "preterm", "term")
+
+# *negative control* outcome: gender
+full_dat$gender_code <- ifelse(full_dat$gender == "M", 1, 0)
+
+# grab confounders
+dat <- fread("/Users/brenna/Downloads/birth_exposures_with_confounders.csv")
+
+confounders <- dat[, c("momid", "grid_id", "gestation", "birthccyy", "birthmm", 
+                       "mommedicaid_char", "mommaritalstatus_char",
+                       "momwic_char", "momeducation_char", "momage",
+                       "poverty_rate")]
+rm(dat)
+
+# and a few more
+mom <- read.csv('../../data/health data/births.csv')
+mom_2013 <- fread('/Users/brenna/Downloads/births 2013+.csv')
+mom_2016 <- fread('/Users/brenna/Downloads/births 2016+.csv')
+
+mom <- rbind(mom_2013, mom_2016)
+
+mom <- mom |>
+  mutate(MomHeightFeet = as.numeric(MomHeightFeet),
+         MomHeightFeet = ifelse(MomHeightFeet == 1, NA, MomHeightFeet),
+         MomHeightInches = as.numeric(MomHeightInches),
+         race_ethn = case_when(MomHispanicOrigin == 1 | MomHispanicMex == 1 |
+                                 MomHispanicCuban == 1 | MomHispanicPuertoRican == 1 |
+                                 MomHispanicOther == 1 | MomHispanicOtherSpec != "" |
+                                 !MomHispanicOtherSpec %in% c("*", "") ~ # primacy
+                                 "hispanic",
+                               MomRaceWhite == 1 ~ "white",
+                               MomRaceBlack == 1 ~ "black",
+                               MomRaceAmIndian == 1 ~ "amindian",
+                               MomRaceChinese == 1 | MomRaceJapanese == 1 |
+                                 MomRaceFilipino == 1 | MomRaceOtherAsian == 1 |
+                                 MomRaceAsianIndian == 1 | MomRaceKorean == 1 |
+                                 MomRaceVietnamese == 1 ~ "asian",
+                               MomRaceHawaiian == 1 | MomRaceSamoan == 1 |
+                                 MomRaceGuamanian == 1 | MomRacePacIslander == 1 |
+                                 MomRaceTongan == 1 ~ "nhopi",
+                               MomRaceOther == 1 | MomRaceOtherSpec1 == 1 |
+                                 MomRaceOtherSpec2 == 1 | MomRaceUnknown == 1 ~ "other"),
+         race_ethn = ifelse(is.na(race_ethn), "other", race_ethn),
+         # there's one maternal_wt = 550; 
+         # this could be a recording error, but it's prior to 2013 so don't bother with it
+         MomWeightPrior = as.numeric(MomWeightPrior),
+         # bmi = ((lbs * 703) / inches) / inches
+         mom_bmi = ((MomWeightPrior * 703) / 
+                      (12 * MomHeightFeet + MomHeightInches)) / 
+           (12 * MomHeightFeet + MomHeightInches))
+
+names(mom) <- tolower(names(mom))
+mom <- mom[, c("momid", "birthccyy", "birthmm",
+               "race_ethn")] #, "mom_bmi", "momheightfeet",
+#"momheightinches", "momweightprior"
+# note: too much missing in BMI
+mom$momid <- as.numeric(mom$momid)
+
+# and a couple more
+table(full_dat[, c("prevpregnowliving", "prevpregnowdead", "prevpregstillborn")])
+# none — these were excluded; our cohort is nulligravida (as far as we know)
+
+# birth data
+full_dat <- merge(full_dat, mom, by = c("momid", "birthccyy", "birthmm"))
+z <- read.csv("data/birth_traj_trunc_jun08.csv")
+
+z_y <- merge(z, full_dat[, c("momid", "grid_id", "birthccyy", "birthmm",
+                             "sga", "hypertension_code",
+                             "pl_insuf", "preterm", "preterm_code",
+                             "gestational_hyp", "very_preterm",
+                             "gestational_diab", "gender_code",
+                             "race_ethn")], 
+             by = c("momid", "grid_id")) # N = 44984
+
+dat_con <- merge(z_y, confounders, by = c("momid", "grid_id", 
+                                          "birthccyy", "birthmm"))
+
+dat_con$poverty_rate <- ifelse(is.na(dat_con$poverty_rate), 0, dat_con$poverty_rate)
+dat_con$poverty_rate_sc <- (dat_con$poverty_rate - mean(dat_con$poverty_rate)) / 10
+
+# drop subsequent pregnancies
+test <- dat_con |>
+  arrange(momid, birthccyy, birthmm)
+
+dat_con <- test[match(unique(test$momid), test$momid), ]
+
+```
+
+
+
+```{r}
+
+names(dat_con)
+
+## 6-week critical window for cluster 5: weeks 24-29
+cw_5 <- dat_con[, 29:34]
+## 6-week critical window for cluster 10: weeks 9-13
+cw_10 <- dat_con[, 14:19]
+
+# increased duration of exposure to cluster 10
+dat_con$duration_10 <- apply(cw_10, 1, function(x) length(which(x==as.character("10"))))
+
+dat_con <- dat_con |>
+  mutate(duration_10 = as.factor(duration_10))
+
+m_10 <- inla(preterm_code ~ duration_10 +
+               poverty_rate_sc + race_ethn, 
+             family = "binomial", data = dat_con,
+             control.predictor = list(compute = T),
+             control.compute = list(dic = TRUE, waic = TRUE),
+             verbose = FALSE)
+summary(m_10)
+
+# increased duration of exposure to cluster 5
+dat_con$duration_5 <- apply(cw_5, 1, function(x) length(which(x==as.character("5"))))
+
+dat_con <- dat_con |>
+  mutate(duration_5 = as.factor(duration_5))
+
+m_5 <- inla(preterm_code ~ duration_5 +
+              poverty_rate_sc + race_ethn, 
+            family = "binomial", data = dat_con,
+            control.predictor = list(compute = T),
+            control.compute = list(dic = TRUE, waic = TRUE),
+            verbose = FALSE)
+summary(m_5)
+
+```
+
+### Storing results  
+
+```{r}
+
+p_value_function <- function(x) inla.pmarginal(0, x)
+
+duration_alpha_level = 0.05 / (6 * 12) # 6 week-window, for 12 clusters
+
+# storing results
+cw_res_10 <- data.frame(variable = rownames(m_10$summary.fixed),
+                        mean = m_10$summary.fixed$mean,
+                        q0.025 = m_10$summary.fixed$`0.025quant`,
+                        q0.975 = m_10$summary.fixed$`0.975quant`) |>
+  mutate(p_value <- map_df(lapply(m_10$marginals.fixed, 
+                                   p_value_function),
+                            ~as.data.frame(.))) |>
+    rename(p_value = `.`) |>
+  filter(grepl("duration", variable) == TRUE) |>
+  mutate(duration = as.numeric(str_replace(variable, "duration_10", ""))) |>
+  mutate(or = exp(mean)) |>
+  mutate(lwr = exp(q0.025)) |>
+  mutate(upr = exp(q0.975)) |>
+  mutate(bonferroni = ifelse(p_value > duration_alpha_level, "not", "significant"))
+
+cw_res_5 <- data.frame(variable = rownames(m_5$summary.fixed),
+                       mean = m_5$summary.fixed$mean,
+                       q0.025 = m_5$summary.fixed$`0.025quant`,
+                       q0.975 = m_5$summary.fixed$`0.975quant`) |>
+  mutate(p_value <- map_df(lapply(m_5$marginals.fixed, 
+                                  p_value_function),
+                           ~as.data.frame(.))) |>
+  rename(p_value = `.`) |>
+  filter(grepl("duration", variable) == TRUE) |>
+  mutate(duration = as.numeric(str_replace(variable, "duration_5", ""))) |>
+  mutate(or = exp(mean)) |>
+  mutate(lwr = exp(q0.025)) |>
+  mutate(upr = exp(q0.975)) |>
+  mutate(bonferroni = ifelse(p_value > duration_alpha_level, "not", "significant"))
+
+```
+
+### Plotting
+
+```{r}
+
+# plots
+plt_cw_10 <- ggplot(cw_res_10, aes(x = duration, y = or)) +
+  geom_point() +
+  geom_linerange(aes(ymin = lwr, ymax = upr)) +
+  geom_hline(yintercept = 1) +
+  ggtitle("Cluster 10 Critical Window Exposure") +
+  ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
+  xlab("Duration of Exposure (weeks 9-14)") +
+  theme_classic() +
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.6, hjust = 1))
+
+plt_cw_5 <- ggplot(cw_res_5, aes(x = duration, y = or)) +
+  geom_point() +
+  geom_linerange(aes(ymin = lwr, ymax = upr)) +
+  geom_hline(yintercept = 1) +
+  ggtitle("Cluster 5 Critical Window Exposure") +
+  ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
+  xlab("Duration of Exposure (weeks 24-29)") +
+  theme_classic() +
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.6, hjust = 1))
+
+
+ggarrange(plt_cw_10,
+          plt_cw_5)
+
+
+```
+
+### a few stats (for the supplement?)
+
+```{r}
+
+library(tableone)
+
+CreateTableOne(vars = c("duration_10", "duration_5"), strata = "preterm", data = dat_con)
+# duration varies significantly across outcome for cluster 10, but not for cluster 5
+
+```
+
+
+
+
+### now do this for all other clusters, for the supplement  
+
+Run the model for increased duration of exposure during cluster 5's critical window for all other clusters.
+
+```{r}
+
+## cluster 5's critical window
+cw_5_loop <- list()
+
+for(i in 1:12) {
+  
+  dat_con$duration_5 <- apply(cw_5, 1, function(x) length(which(x==as.character(i))))
+  
+  dat_con <- dat_con |>
+    mutate(duration_5 = as.factor(duration_5))
+  
+  m_5_loop <- inla(preterm_code ~ duration_5 +
+                     poverty_rate_sc + race_ethn, 
+                   family = "binomial", data = dat_con,
+                   control.predictor = list(compute = T),
+                   control.compute = list(dic = TRUE, waic = TRUE),
+                   verbose = FALSE)
+  
+  cw_5_loop[[i]] <- data.frame(variable = rownames(m_5_loop$summary.fixed),
+                               mean = m_5_loop$summary.fixed$mean,
+                               q0.025 = m_5_loop$summary.fixed$`0.025quant`,
+                               q0.975 = m_5_loop$summary.fixed$`0.975quant`) |>
+    mutate(p_value <- map_df(lapply(m_5_loop$marginals.fixed, 
+                                    p_value_function),
+                             ~as.data.frame(.))) |>
+    rename(p_value = `.`) |>
+    filter(grepl("duration", variable) == TRUE) |>
+    mutate(duration = as.numeric(str_replace(variable, "duration_5", ""))) |>
+    mutate(or = exp(mean)) |>
+    mutate(lwr = exp(q0.025)) |>
+    mutate(upr = exp(q0.975)) |>
+    mutate(bonferroni = ifelse(p_value > duration_alpha_level, "not", "significant")) |>
+    mutate(cluster = i)
+  
+}
+
+cw_5_comparison <- map_df(cw_5_loop, ~as.data.frame(.))
+
+# just a note —
+table(cw_5_comparison$bonferroni)
+# none significant after bonferroni
+
+ggplot(cw_5_comparison, aes(x = duration, y = or)) +
+  geom_point() +
+  geom_linerange(aes(ymin = lwr, ymax = upr)) +
+  geom_hline(yintercept = 1) +
+  ggtitle("Cluster 5 Critical Window Exposure") +
+  ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
+  xlab("Duration of Exposure \n(number of weeks exposed 24-29)") +
+  # ylim(0.1, 3) +
+  theme_classic() +
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.6, hjust = 1)) +
+  facet_wrap(~cluster, scales = "free")
+
+
+```
+
+Run the model for increased duration of exposure during cluster 10's critical window for all other clusters.
+
+```{r}
+
+## cluster 50's critical window
+cw_10_loop <- list()
+
+for(i in 1:12) {
+  
+  dat_con$duration_10 <- apply(cw_10, 1, function(x) length(which(x==as.character(i))))
+  
+  dat_con <- dat_con |>
+    mutate(duration_10 = as.factor(duration_10))
+  
+  m_10_loop <- inla(preterm_code ~ duration_10 +
+                     poverty_rate_sc + race_ethn, 
+                   family = "binomial", data = dat_con,
+                   control.predictor = list(compute = T),
+                   control.compute = list(dic = TRUE, waic = TRUE),
+                   verbose = FALSE)
+  
+  cw_10_loop[[i]] <- data.frame(variable = rownames(m_10_loop$summary.fixed),
+                               mean = m_10_loop$summary.fixed$mean,
+                               q0.025 = m_10_loop$summary.fixed$`0.025quant`,
+                               q0.975 = m_10_loop$summary.fixed$`0.975quant`) |>
+    mutate(p_value <- map_df(lapply(m_10_loop$marginals.fixed, 
+                                    p_value_function),
+                             ~as.data.frame(.))) |>
+    rename(p_value = `.`) |>
+    filter(grepl("duration", variable) == TRUE) |>
+    mutate(duration = as.numeric(str_replace(variable, "duration_10", ""))) |>
+    mutate(or = exp(mean)) |>
+    mutate(lwr = exp(q0.025)) |>
+    mutate(upr = exp(q0.975)) |>
+    mutate(bonferroni = ifelse(p_value > duration_alpha_level, "not", "significant")) |>
+    mutate(cluster = i)
+  
+}
+
+cw_10_comparison <- map_df(cw_10_loop, ~as.data.frame(.))
+
+# just a note —
+table(cw_10_comparison$bonferroni)
+# one significant after bonferroni — cluster 10, exposure during entire critical window
+
+ggplot(cw_10_comparison, aes(x = duration, y = or)) +
+  geom_point() +
+  geom_linerange(aes(ymin = lwr, ymax = upr)) +
+  geom_hline(yintercept = 1) +
+  ggtitle("Cluster 10 Critical Window Exposure") +
+  ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
+  xlab("Duration of Exposure \n(number of weeks exposed 9-14)") +
+  # ylim(0.1, 3) +
+  theme_classic() +
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.6, hjust = 1)) +
+  facet_wrap(~cluster, scales = "free")
+
+
+```
