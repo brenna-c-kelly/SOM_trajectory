@@ -372,14 +372,12 @@ plot(test_glm_cr1, plot.fixed.effects = FALSE,
      plot.predictor = FALSE, cex = 1.25)
 # not ideal, but
 
-# bonferroni adjustment
-alpha_level = 0.05 / (33 * 12) # 33 weeks, 12 clusters
-
+# taking a peak
 inla.pmarginal(0, res_1$marginals.fixed$`cluster_101:exposure_weekweek_10`)
 inla.pmarginal(0, res_1$marginals.fixed$`cluster_101:exposure_weekweek_11`)
 inla.pmarginal(0, res_1$marginals.fixed$`cluster_101:exposure_weekweek_12`)
 
-
+# storing results
 results <- data.frame(variable = rownames(res_1$summary.fixed),
                       mean = res_1$summary.fixed$mean,
                       q0.025 = res_1$summary.fixed$`0.025quant`,
@@ -398,6 +396,41 @@ results$p_value <- map_df(lapply(res_1$marginals.fixed,
 ### plot results
 
 ```{r}
+
+# only effects of interest; those related to exposure to cluster 10
+results <- results |>
+  filter(grepl("cluster_101", variable) == TRUE)
+
+# tidying
+results$variable <- str_replace(results$variable, "cluster_101:exposure_week", "")
+results$variable <- ifelse(results$variable == "cluster_101", "week_1",
+                           results$variable)
+results$week <- as.numeric(
+  str_replace(results$variable, "week_", ""))
+
+# bonferroni adjustment
+alpha_level = 0.05 / (33 * 12) # 33 weeks, 12 clusters
+
+results$bonferroni <- ifelse(results$p_value > alpha_level, "not", "significant")
+table(results$bonferroni)
+# not significant, but that's alright; I've always wanted to publish a paper without any "significant" results
+
+# exponentiating
+results$or <- exp(results$mean)
+results$lwr <- exp(results$q0.025)
+results$upr <- exp(results$q0.975)
+
+ggplot(results, aes(x = week, y = or)) +
+  geom_point() +
+  geom_linerange(aes(ymin = lwr, ymax = upr)) +
+  geom_hline(yintercept = 1) +
+  # facet_wrap(~ cluster, scales = "fixed") +
+  ggtitle("Cluster 10 Exposure") +
+  ylab("Odds of Preterm Birth (≤34 weeks)") +
+  xlab("Exposure Week") +
+  theme_classic()
+
+
 
 
 

@@ -1,0 +1,286 @@
+---
+title: "03_model loop"
+author: "Brenna Kelly"
+date: "2025-06-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+
+library(INLA)
+library(tidyr)
+library(dplyr)
+library(purrr)
+library(stringr)
+library(survival)
+library(regclass)
+library(survminer)
+library(data.table)
+library(performance)
+
+# OG
+full_dat <- read.csv("data/clean_birth_data.csv")
+# outcome: placental insufficiency
+full_dat$hypertension_code <- ifelse(full_dat$hypertension %in% c("C", "E", "H", "P"),
+                                     "hyp", "no")
+full_dat$pl_insuf <- case_when(full_dat$sga10_by_sex > full_dat$birthweightgrams ~ 1, # sga
+                               full_dat$hypertension %in% c("H", "E", "P") ~ 1)
+full_dat$pl_insuf <- ifelse(is.na(full_dat$pl_insuf), 0, 1)
+
+# outcome: gestational hypertension
+full_dat$gestational_hyp <- ifelse(full_dat$hypertension %in% c("H", "E", "P"), 1, 0)
+
+# outcome: gestational diabetes
+full_dat$gestational_diab <- ifelse(full_dat$gestationaldiabetes == 1, 1, 0)
+
+# outcome: preterm birth
+full_dat$preterm <- ifelse(full_dat$gestation < 34, "preterm", "term")
+full_dat$preterm_code <- ifelse(full_dat$preterm == "preterm", 1, 0)
+
+# outcome: very preterm birth
+full_dat$very_preterm <- ifelse(full_dat$gestation < 30, "preterm", "term")
+
+# *negative control* outcome: gender
+full_dat$gender_code <- ifelse(full_dat$gender == "M", 1, 0)
+
+# grab confounders
+dat <- fread("/Users/brenna/Downloads/birth_exposures_with_confounders.csv")
+
+confounders <- dat[, c("momid", "grid_id", "gestation", "birthccyy", "birthmm", 
+                       "mommedicaid_char", "mommaritalstatus_char",
+                       "momwic_char", "momeducation_char", "momage",
+                       "poverty_rate")]
+rm(dat)
+
+# and a few more
+mom <- read.csv('../../data/health data/births.csv')
+mom_2013 <- fread('/Users/brenna/Downloads/births 2013+.csv')
+mom_2016 <- fread('/Users/brenna/Downloads/births 2016+.csv')
+
+mom <- rbind(mom_2013, mom_2016)
+
+mom <- mom |>
+  mutate(MomHeightFeet = as.numeric(MomHeightFeet),
+         MomHeightFeet = ifelse(MomHeightFeet == 1, NA, MomHeightFeet),
+         MomHeightInches = as.numeric(MomHeightInches),
+         race_ethn = case_when(MomHispanicOrigin == 1 | MomHispanicMex == 1 |
+                                 MomHispanicCuban == 1 | MomHispanicPuertoRican == 1 |
+                                 MomHispanicOther == 1 | MomHispanicOtherSpec != "" |
+                                 !MomHispanicOtherSpec %in% c("*", "") ~ # primacy
+                                 "hispanic",
+                               MomRaceWhite == 1 ~ "white",
+                               MomRaceBlack == 1 ~ "black",
+                               MomRaceAmIndian == 1 ~ "amindian",
+                               MomRaceChinese == 1 | MomRaceJapanese == 1 |
+                                 MomRaceFilipino == 1 | MomRaceOtherAsian == 1 |
+                                 MomRaceAsianIndian == 1 | MomRaceKorean == 1 |
+                                 MomRaceVietnamese == 1 ~ "asian",
+                               MomRaceHawaiian == 1 | MomRaceSamoan == 1 |
+                                 MomRaceGuamanian == 1 | MomRacePacIslander == 1 |
+                                 MomRaceTongan == 1 ~ "nhopi",
+                               MomRaceOther == 1 | MomRaceOtherSpec1 == 1 |
+                                 MomRaceOtherSpec2 == 1 | MomRaceUnknown == 1 ~ "other"),
+         race_ethn = ifelse(is.na(race_ethn), "other", race_ethn),
+         # there's one maternal_wt = 550; 
+         # this could be a recording error, but it's prior to 2013 so don't bother with it
+         MomWeightPrior = as.numeric(MomWeightPrior),
+         # bmi = ((lbs * 703) / inches) / inches
+         mom_bmi = ((MomWeightPrior * 703) / 
+                      (12 * MomHeightFeet + MomHeightInches)) / 
+           (12 * MomHeightFeet + MomHeightInches))
+
+names(mom) <- tolower(names(mom))
+mom <- mom[, c("momid", "birthccyy", "birthmm",
+               "race_ethn")] #, "mom_bmi", "momheightfeet",
+#"momheightinches", "momweightprior"
+# note: too much missing in BMI
+mom$momid <- as.numeric(mom$momid)
+
+# and a couple more
+table(full_dat[, c("prevpregnowliving", "prevpregnowdead", "prevpregstillborn")])
+# none — these were excluded; our cohort is nulligravida (as far as we know)
+
+# birth data
+full_dat <- merge(full_dat, mom, by = c("momid", "birthccyy", "birthmm"))
+z <- read.csv("data/birth_traj_trunc_jun08.csv")
+
+z_y <- merge(z, full_dat[, c("momid", "grid_id", "birthccyy", "birthmm",
+                             "sga", "hypertension_code",
+                             "pl_insuf", "preterm", "preterm_code",
+                             "gestational_hyp", "very_preterm",
+                             "gestational_diab", "gender_code",
+                             "race_ethn")], 
+             by = c("momid", "grid_id")) # N = 44984
+
+dat_con <- merge(z_y, confounders, by = c("momid", "grid_id", 
+                                          "birthccyy", "birthmm"))
+
+dat_con$poverty_rate <- ifelse(is.na(dat_con$poverty_rate), 0, dat_con$poverty_rate)
+dat_con$poverty_rate_sc <- (dat_con$poverty_rate - mean(dat_con$poverty_rate)) / 10
+
+# drop subsequent pregnancies
+test <- dat_con |>
+  arrange(momid, birthccyy, birthmm)
+
+dat_con <- test[match(unique(test$momid), test$momid), ]
+
+
+
+```
+
+
+```{r}
+
+
+inla_models <- list()
+inla_results <- list()
+
+for(i in 1:12) {
+  
+  ##### encoding clusters
+  recode_fx <- function(x) {
+    x = case_when(x == i ~ "1",
+                  x == 0 ~ "rm")
+    x = ifelse(is.na(x), "0", x)
+    return(x)
+  }
+  
+  dat_10 <- dat_con |>
+    mutate(across(week_1:week_45, ~ recode_fx(.)))
+  
+  dat_10 <- dat_10 |>
+    mutate(across(week_1:week_44, ~relevel(as.factor(.), ref = "0")))
+  # week 45 has no = 0
+  
+  ##### reformatting
+  dat_10_long <- dat_10 |>
+    pivot_longer(week_1:week_45, names_to = "exposure_week", 
+                 values_to = "cluster_10") |>
+    # remove "rm", as the exposure does not exist (exposure occurs after event)
+    filter(cluster_10 != "rm") |>
+    mutate(week = as.numeric(
+      str_replace(exposure_week, "week_", ""))) |>
+    filter(!week %in% as.character(c(34:45))) |>
+    filter(week <= gestation)
+
+  
+  dat_10_long$momid <- as.factor(dat_10_long$momid)
+  
+  dat_10_long$race_ethn <- relevel(as.factor(dat_10_long$race_ethn), ref = "white")
+  
+  res_1 <- inla(preterm_code ~ #f(momid, model = "iid", hyper = prec.prior) +
+                  cluster_10*exposure_week +
+                  f(week, model = "rw1") +
+                  poverty_rate_sc +
+                  # momage + momeducation_char +
+                  race_ethn,
+                data = dat_10_long, family = "binomial",
+                control.predictor = list(compute = T),
+                control.compute = list(dic = TRUE, waic = TRUE),
+                control.inla = list(int.strategy = "eb"),
+                # control.fixed = list(expand.factor.strategy = "inla"),
+                verbose = FALSE)
+  
+  # print(summary(res_1))
+  
+  inla_models[[i]] <- summary(res_1)
+
+  # storing results
+  results <- data.frame(variable = rownames(res_1$summary.fixed),
+                        mean = res_1$summary.fixed$mean,
+                        q0.025 = res_1$summary.fixed$`0.025quant`,
+                        q0.975 = res_1$summary.fixed$`0.975quant`)
+  
+  p_value_function <- function(x) inla.pmarginal(0, x)
+  
+  results$p_value <- map_df(lapply(res_1$marginals.fixed, 
+                                   p_value_function),
+                            ~as.data.frame(.)) |>
+    rename(p_value = `.`)
+  
+  results <- results |>
+    filter(grepl("cluster_101", variable) == TRUE)
+  
+  # tidying
+  results$variable <- str_replace(results$variable, "cluster_101:exposure_week", "")
+  results$variable <- ifelse(results$variable == "cluster_101", "week_1",
+                             results$variable)
+  results$week <- as.numeric(
+    str_replace(results$variable, "week_", ""))
+  
+  # bonferroni adjustment
+  alpha_level = 0.05 / (33 * 12) # 33 weeks, 12 clusters
+  
+  results$bonferroni <- ifelse(results$p_value > alpha_level, "not", "significant")
+  table(results$bonferroni)
+  # not significant, but that's alright; I've always wanted to publish a paper without any "significant" results
+  
+  # exponentiating
+  results$or <- exp(results$mean)
+  results$lwr <- exp(results$q0.025)
+  results$upr <- exp(results$q0.975)
+  
+  results$cluster <- i
+  
+  inla_results[[i]] <- results
+  
+  print(paste("finished with cluster", i))
+  
+  # write.csv(paste0("data/results/cluster",
+  #                  str_pad(i, width = 2, side = "left", pad = "0"),
+  #                  ".csv"), row.names = FALSE)
+
+}
+
+# cl_1 <- inla_models
+# inla_models
+
+inla_models
+inla_results
+
+```
+
+
+```{r}
+### plotting hyperparameters
+
+
+for(i in inla_models) {
+  
+  return(plot(res_1, plot.fixed.effects = FALSE,
+              plot.random.effects = FALSE,
+              plot.hyperparameters = TRUE,
+              plot.predictor = FALSE, cex = 1.25))
+  
+}
+
+
+```
+
+
+
+```{r}
+
+ggplot(cl_1, aes(x = week, y = or)) +
+  geom_point() +
+  geom_linerange(aes(ymin = lwr, ymax = upr)) +
+  geom_hline(yintercept = 1) +
+  # facet_wrap(~ cluster, scales = "fixed") +
+  ggtitle("Cluster 1 Exposure") +
+  ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
+  xlab("Exposure Week") +
+  theme_classic() +
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.6, hjust = 1)) +
+  facet_wrap(~cluster)
+
+
+```
+
+
+
