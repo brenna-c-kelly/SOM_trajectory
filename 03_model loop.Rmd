@@ -308,9 +308,10 @@ cl_results |>
 ```{r}
 
 ## are there significant (ala bonferroni) results anywhere?
-
 table(cl_results$bonferroni)
+# there's just one
 
+# cluster 5, gestation week 28
 cl_results[which(cl_results$bonferroni == "significant"), ]
 
 

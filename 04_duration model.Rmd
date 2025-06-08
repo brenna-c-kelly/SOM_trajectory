@@ -197,6 +197,7 @@ cw_res_10 <- data.frame(variable = rownames(m_10$summary.fixed),
   mutate(lwr = exp(q0.025)) |>
   mutate(upr = exp(q0.975)) |>
   mutate(bonferroni = ifelse(p_value > duration_alpha_level, "not", "significant"))
+# write.csv(cw_res_10, "data/results/cw_res_10.csv", row.names = FALSE)
 
 cw_res_5 <- data.frame(variable = rownames(m_5$summary.fixed),
                        mean = m_5$summary.fixed$mean,
@@ -212,6 +213,7 @@ cw_res_5 <- data.frame(variable = rownames(m_5$summary.fixed),
   mutate(lwr = exp(q0.025)) |>
   mutate(upr = exp(q0.975)) |>
   mutate(bonferroni = ifelse(p_value > duration_alpha_level, "not", "significant"))
+# write.csv(cw_res_5, "data/results/cw_res_5.csv", row.names = FALSE)
 
 ```
 

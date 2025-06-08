@@ -53,7 +53,7 @@ confounders <- dat[, c("momid", "grid_id", "gestation", "birthccyy", "birthmm",
 rm(dat)
 
 # and a few more
-mom <- read.csv('../../data/health data/births.csv')
+# mom <- read.csv('../../data/health data/births.csv')
 mom_2013 <- fread('/Users/brenna/Downloads/births 2013+.csv')
 mom_2016 <- fread('/Users/brenna/Downloads/births 2016+.csv')
 
@@ -291,18 +291,6 @@ library(tidyr)
 library(stringr)
 library(performance)
 
-# # check for zero inflation
-# check_zi <- glm(preterm_code ~ 1,
-#                 data = dat_10,
-#                 family = "binomial")
-# 
-# summary(check_zi)
-# 
-# check_zeroinflation(
-#   glm(preterm_code ~ 1,
-#       data = dat_10,
-#       family = "binomial"))
-# 
 
 dat_10_long <- dat_10 |>
   pivot_longer(week_1:week_45, names_to = "exposure_week", 
@@ -312,15 +300,6 @@ dat_10_long <- dat_10 |>
 
 head(dat_10_long)
 
-
-#zeroinfl
-# 
-# test <- dat_10_long |>
-#   filter(exposure_week %in% c("week_10", "week_11", "week_12"))# |>
-#   # mutate(cluster_10 = as.numeric(cluster_10)) |>
-  # mutate(exposure_week = as.numeric(
-  #   str_replace(exposure_week, "week_", "")
-  # ))
 
 test_2 <- dat_10_long |>
   mutate(week = as.numeric(
@@ -342,7 +321,7 @@ test_2$momid <- as.factor(test_2$momid)
 test_2$race_ethn <- relevel(as.factor(test_2$race_ethn), ref = "white")
 
 system.time(
-  res_1 <- inla(preterm_code ~ #f(momid, model = "iid", hyper = prec.prior) +
+  res_0 <- inla(preterm_code ~ #f(momid, model = "iid", hyper = prec.prior) +
                   cluster_10*exposure_week +
                   f(week, model = "rw1") +
                   poverty_rate_sc +
@@ -356,17 +335,19 @@ system.time(
                 verbose = FALSE)
 )
 
+summary(res_0)
+
 # cluster_10*exposure_week + f(week)
 # WAIC: 270802.42
 # cluster_10*exposure_week + f(week) + confounders
 # WAIC: 267276.57
-# cluster_10*exposure_week + f(week) + only poverty and race, ethnicity
+# cluster_10*exposure_week + f(week) + only poverty and race, ethnicity (minimal adjustment set)
 # WAIC: 270354.38
 
 summary(res_1)
 
 # plotting hyperparameters
-plot(test_glm_cr1, plot.fixed.effects = FALSE,
+plot(res_1, plot.fixed.effects = FALSE,
      plot.random.effects = FALSE,
      plot.hyperparameters = TRUE,
      plot.predictor = FALSE, cex = 1.25)
@@ -426,9 +407,10 @@ ggplot(results, aes(x = week, y = or)) +
   geom_hline(yintercept = 1) +
   # facet_wrap(~ cluster, scales = "fixed") +
   ggtitle("Cluster 10 Exposure") +
-  ylab("Odds of Preterm Birth (≤34 weeks)") +
+  ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
   xlab("Exposure Week") +
-  theme_classic()
+  theme_classic() +
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.6, hjust = 1))
 
 
 
