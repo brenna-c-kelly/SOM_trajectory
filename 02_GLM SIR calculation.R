@@ -32,7 +32,7 @@ full_dat$gender_code <- ifelse(full_dat$gender == "M", 1, 0)
 # grab confounders
 dat <- fread("/Users/brenna/Downloads/birth_exposures_with_confounders.csv")
 
-confounders <- dat[, c("momid", "grid_id", "birthccyy", "birthmm", 
+confounders <- dat[, c("momid", "grid_id", "gestation", "birthccyy", "birthmm", 
                        "mommedicaid_char", "mommaritalstatus_char",
                        "momwic_char", "momeducation_char", "momage",
                        "poverty_rate")]
@@ -103,7 +103,6 @@ dat_con <- merge(z_y, confounders, by = c("momid", "grid_id",
 
 dat_con$poverty_rate <- ifelse(is.na(dat_con$poverty_rate), 0, dat_con$poverty_rate)
 dat_con$poverty_rate_sc <- (dat_con$poverty_rate - mean(dat_con$poverty_rate)) / 10
-
 
 
 recode_fx <- function(x) {

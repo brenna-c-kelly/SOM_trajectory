@@ -143,6 +143,8 @@ names(dat_con)
 cw_5 <- dat_con[, 29:34]
 ## 6-week critical window for cluster 10: weeks 9-13
 cw_10 <- dat_con[, 14:19]
+## 6-week critical window for cluster 1: weeks 9-13
+cw_1 <- dat_con[, 14:18]
 
 # increased duration of exposure to cluster 10
 dat_con$duration_10 <- apply(cw_10, 1, function(x) length(which(x==as.character("10"))))
@@ -172,6 +174,20 @@ m_5 <- inla(preterm_code ~ duration_5 +
             verbose = FALSE)
 summary(m_5)
 
+# increased duration of exposure to cluster 1
+dat_con$duration_1 <- apply(cw_1, 1, function(x) length(which(x==as.character("1"))))
+
+dat_con <- dat_con |>
+  mutate(duration_1 = as.factor(duration_1))
+
+m_1 <- inla(preterm_code ~ duration_1 +
+              poverty_rate_sc + race_ethn, 
+            family = "binomial", data = dat_con,
+            control.predictor = list(compute = T),
+            control.compute = list(dic = TRUE, waic = TRUE),
+            verbose = FALSE)
+summary(m_1)
+
 ```
 
 ### Storing results  
@@ -181,6 +197,7 @@ summary(m_5)
 p_value_function <- function(x) inla.pmarginal(0, x)
 
 duration_alpha_level = 0.05 / (6 * 12) # 6 week-window, for 12 clusters
+duration_alpha_level_1 = 0.05 / (5 * 12) # 1 week-window, for 12 clusters; for cw_1
 
 # storing results
 cw_res_10 <- data.frame(variable = rownames(m_10$summary.fixed),
@@ -198,6 +215,7 @@ cw_res_10 <- data.frame(variable = rownames(m_10$summary.fixed),
   mutate(upr = exp(q0.975)) |>
   mutate(bonferroni = ifelse(p_value > duration_alpha_level, "not", "significant"))
 # write.csv(cw_res_10, "data/results/cw_res_10.csv", row.names = FALSE)
+# cw_res_10 <- read.csv("data/results/cw_res_10.csv")
 
 cw_res_5 <- data.frame(variable = rownames(m_5$summary.fixed),
                        mean = m_5$summary.fixed$mean,
@@ -214,6 +232,24 @@ cw_res_5 <- data.frame(variable = rownames(m_5$summary.fixed),
   mutate(upr = exp(q0.975)) |>
   mutate(bonferroni = ifelse(p_value > duration_alpha_level, "not", "significant"))
 # write.csv(cw_res_5, "data/results/cw_res_5.csv", row.names = FALSE)
+# cw_res_5 <- read.csv("data/results/cw_res_5.csv")
+
+cw_res_1 <- data.frame(variable = rownames(m_1$summary.fixed),
+                       mean = m_1$summary.fixed$mean,
+                       q0.025 = m_1$summary.fixed$`0.025quant`,
+                       q0.975 = m_1$summary.fixed$`0.975quant`) |>
+  mutate(p_value <- map_df(lapply(m_1$marginals.fixed, 
+                                  p_value_function),
+                           ~as.data.frame(.))) |>
+  rename(p_value = `.`) |>
+  filter(grepl("duration", variable) == TRUE) |>
+  mutate(duration = as.numeric(str_replace(variable, "duration_1", ""))) |>
+  mutate(or = exp(mean)) |>
+  mutate(lwr = exp(q0.025)) |>
+  mutate(upr = exp(q0.975)) |>
+  mutate(bonferroni = ifelse(p_value > duration_alpha_level_1, "not", "significant"))
+# write.csv(cw_res_1, "data/results/cw_res_1.csv", row.names = FALSE)
+# cw_res_1 <- read.csv("data/results/cw_res_1.csv")
 
 ```
 
@@ -243,8 +279,19 @@ plt_cw_5 <- ggplot(cw_res_5, aes(x = duration, y = or)) +
   theme(axis.title.y = element_text(angle = 0, vjust = 0.6, hjust = 1))
 
 
+plt_cw_1 <- ggplot(cw_res_1, aes(x = duration, y = or)) +
+  geom_point() +
+  geom_linerange(aes(ymin = lwr, ymax = upr)) +
+  geom_hline(yintercept = 1) +
+  ggtitle("Cluster 1 Critical Window Exposure") +
+  ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
+  xlab("Duration of Exposure (weeks 9-13)") +
+  theme_classic() +
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.6, hjust = 1))
+
 ggarrange(plt_cw_10,
-          plt_cw_5)
+          plt_cw_5,
+          plt_cw_1)
 
 
 ```
@@ -259,6 +306,47 @@ CreateTableOne(vars = c("duration_10", "duration_5"), strata = "preterm", data =
 # duration varies significantly across outcome for cluster 10, but not for cluster 5
 
 ```
+
+
+```{r}
+
+comp_5_10 <- dat_con |>
+  mutate(exposure_10_cw = ifelse(duration_10 != 0, 1, 0)) |>
+  mutate(exposure_5_cw = ifelse(duration_5 != 0, 1, 0))
+
+table(comp_5_10$exposure_10_cw)
+
+comparison_5_10 <- inla(preterm_code ~ exposure_10_cw*exposure_5_cw +
+                          poverty_rate_sc + race_ethn, 
+                        family = "binomial", data = comp_5_10,
+                        control.predictor = list(compute = T),
+                        control.compute = list(dic = TRUE, waic = TRUE),
+                        verbose = FALSE)
+
+summary(comparison_5_10)
+
+# save this information in case it comes up in review
+comparison_5_10 <- data.frame(variable = rownames(comparison_5_10$summary.fixed),
+                       mean = comparison_5_10$summary.fixed$mean,
+                       q0.025 = comparison_5_10$summary.fixed$`0.025quant`,
+                       q0.975 = comparison_5_10$summary.fixed$`0.975quant`) |>
+  mutate(p_value <- map_df(lapply(comparison_5_10$marginals.fixed, 
+                                  p_value_function),
+                           ~as.data.frame(.))) |>
+  rename(p_value = `.`) |>
+  # filter(grepl("duration", variable) == TRUE) |>
+  # mutate(duration = as.numeric(str_replace(variable, "duration_5", ""))) |>
+  mutate(or = exp(mean)) |>
+  mutate(lwr = exp(q0.025)) |>
+  mutate(upr = exp(q0.975)) |>
+  mutate(bonferroni = ifelse(p_value > duration_alpha_level, "not", "significant"))
+# write.csv(comparison_5_10, "data/results/comparison_5_10.csv", row.names = FALSE)
+# comparison_5_10 <- read.csv("data/results/comparison_5_10.csv")
+
+
+```
+
+
 
 
 
@@ -305,6 +393,9 @@ for(i in 1:12) {
 }
 
 cw_5_comparison <- map_df(cw_5_loop, ~as.data.frame(.))
+
+# write.csv(cw_5_comparison, "data/results/cw_5_comparison.csv", row.names = FALSE)
+# cw_5_comparison <- read.csv("data/results/cw_5_comparison.csv")
 
 # just a note —
 table(cw_5_comparison$bonferroni)
@@ -365,6 +456,9 @@ for(i in 1:12) {
 }
 
 cw_10_comparison <- map_df(cw_10_loop, ~as.data.frame(.))
+
+# write.csv(cw_10_comparison, "data/results/cw_10_comparison.csv", row.names = FALSE)
+# cw_10_comparison <- read.csv("data/results/cw_10_comparison.csv")
 
 # just a note —
 table(cw_10_comparison$bonferroni)

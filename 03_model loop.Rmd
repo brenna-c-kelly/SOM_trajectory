@@ -59,7 +59,7 @@ confounders <- dat[, c("momid", "grid_id", "gestation", "birthccyy", "birthmm",
 rm(dat)
 
 # and a few more
-mom <- read.csv('../../data/health data/births.csv')
+# mom <- read.csv('../../data/health data/births.csv')
 mom_2013 <- fread('/Users/brenna/Downloads/births 2013+.csv')
 mom_2016 <- fread('/Users/brenna/Downloads/births 2016+.csv')
 
@@ -134,6 +134,30 @@ dat_con <- test[match(unique(test$momid), test$momid), ]
 
 ```
 
+### Table 1
+
+```{r}
+
+library(tableone)
+
+# find non-normal variables
+hist(dat_con$momage)
+
+?CreateTableOne
+
+tab1 <- print(
+  CreateTableOne(c("race_ethn", "momage", "poverty_rate", "gestation", "birthccyy"),
+                 strata = "preterm", data = dat_con),
+  quote = FALSE, noSpaces = TRUE, printToggle = FALSE,
+  nonnormal = c("momage", "gestation"))
+
+# tab3Mat <- print(tab3, nonnormal = biomarkers, exact = "stage", )
+## Save to a CSV file
+write.csv(tab1, file = "data/results/table_1_mom.csv")
+
+
+```
+
 
 ```{r}
 
@@ -203,6 +227,9 @@ for(i in 1:12) {
                                    p_value_function),
                             ~as.data.frame(.)) |>
     rename(p_value = `.`)
+  results$p_value <- ifelse(results$mean < 0,
+                            1 - results$p_value,
+                            results$p_value)
   
   results <- results |>
     filter(grepl("cluster_101", variable) == TRUE)
@@ -273,34 +300,70 @@ cl_results <- map_df(inla_results, ~as.data.frame(.))
 
 cl_results$cluster <- as.factor(cl_results$cluster)
 
+# write.csv(cl_results, "data/results/inla_results.csv", row.names = FALSE)
+
 cl_plt <- ggplot(cl_results, aes(x = week, y = or)) +
   geom_point() +
   geom_linerange(aes(ymin = lwr, ymax = upr)) +
   geom_hline(yintercept = 1) +
   # facet_wrap(~ cluster, scales = "fixed") +
-  ggtitle("Cluster 1 Exposure") +
+  ggtitle("Exposure to Mixtures (Clusters) Throughout Pregnancy") +
   ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
   xlab("Exposure Week") +
-  ylim(0.25, 2.5) +
+  # ylim(0.15, 5) +
   theme_classic() +
-  theme(axis.title.y = element_text(angle = 0, vjust = 0.6, hjust = 1)) +
-  facet_wrap(~cluster)
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.5, hjust = 1)) +
+  facet_wrap(~cluster, scales = "free")
 
 cl_plt
 
 names(cl_results)
 
+write.csv(cl_results, "data/results/cl_results.csv", row.names = FALSE)
+
+
+##### just cluster 5, 10, 1
+cl_results |>
+  filter(cluster %in% c(1, 5, 10, 11)) |>
+  ggplot(aes(x = week, y = or)) +
+  geom_point() +
+  geom_linerange(aes(ymin = lwr, ymax = upr)) +
+  geom_hline(yintercept = 1) +
+  # facet_wrap(~ cluster, scales = "fixed") +
+  ggtitle("Exposure to Mixtures (Clusters) Throughout Pregnancy") +
+  ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
+  xlab("Exposure Week") +
+  # ylim(0.15, 5) +
+  theme_classic() +
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.5, hjust = 1)) +
+  facet_wrap(~cluster, scales = "free")
+
+
 
 ## what is the critical window for cluster 5?
 cl_results |>
-  filter(cluster == 5)
+  filter(cluster == 5) |>
+  arrange(week)
 # ~ weeks 24-29
 ## what is the critical window for cluster 10?
 cl_results |>
-  filter(cluster == 10)
+  filter(cluster == 10) |>
+  arrange(week)
 # ~ weeks 9-13
 ### use this for the duration models
 
+## does cluster 1 have a critical window?
+cl_results |>
+  filter(cluster == 1) |>
+  arrange(week) |>
+  mutate(p_value = 1 - p_value)
+# - weeks 9-13
+## how about cluster 11?
+cl_results |>
+  filter(cluster == 11) |>
+  arrange(week) |>
+  mutate(p_value = 1 - p_value)
+## this does not even approach significance
 
 ```
 
@@ -314,11 +377,11 @@ table(cl_results$bonferroni)
 # cluster 5, gestation week 28
 cl_results[which(cl_results$bonferroni == "significant"), ]
 
-
 ```
 
 ### levels of preterm  
 Late preterm (>37 weeks) is more likely to be medically indicated. Let's see if there is an association between cluster 5, which is associated with increased risk of preterm birth when exposed in week 28, and varying levels of preterm. Also comparing with cluster 10, which is associated with increased risk of preterm birth during late-first and early-second trimesters.  
+***don't go down this rabbithole***
 
 ```{r}
 
@@ -389,11 +452,11 @@ recode_fx <- function(x) {
 
 head(dat_10)
 # for(j in 1:33) {
-    j = j + 5
-
-    dat_10 <- dat_10 |>
-      filter(dat_10[, j] != "rm")
-}
+#     j = j + 5
+# 
+#     dat_10 <- dat_10 |>
+#       filter(dat_10[, j] != "rm")
+# }
 
 dat_6 <- dat_con |>
   mutate(across(week_1:week_43, ~relevel(as.factor(.), ref = "6")))
@@ -437,7 +500,7 @@ test_6$momid <- as.factor(test_6$momid)
 test_6$race_ethn <- relevel(as.factor(test_6$race_ethn), ref = "white")
 
 system.time(
-  res_0 <- inla(preterm_code ~ #f(momid, model = "iid", hyper = prec.prior) +
+  res_6 <- inla(preterm_code ~ #f(momid, model = "iid", hyper = prec.prior) +
                   cluster*exposure_week +
                   f(week, model = "rw1") +
                   poverty_rate_sc +
@@ -451,7 +514,7 @@ system.time(
                 verbose = FALSE)
 )
 
-summary(res_0)
+summary(res_6)
 
 
 
@@ -459,14 +522,14 @@ summary(res_0)
 
 #####
 # storing results
-results <- data.frame(variable = rownames(res_0$summary.fixed),
-                      mean = res_0$summary.fixed$mean,
-                      q0.025 = res_0$summary.fixed$`0.025quant`,
-                      q0.975 = res_0$summary.fixed$`0.975quant`)
+results <- data.frame(variable = rownames(res_6$summary.fixed),
+                      mean = res_6$summary.fixed$mean,
+                      q0.025 = res_6$summary.fixed$`0.025quant`,
+                      q0.975 = res_6$summary.fixed$`0.975quant`)
 
 p_value_function <- function(x) inla.pmarginal(0, x)
 
-results$p_value <- map_df(lapply(res_0$marginals.fixed, 
+results$p_value <- map_df(lapply(res_6$marginals.fixed, 
                                  p_value_function),
                           ~as.data.frame(.)) |>
   rename(p_value = `.`)
@@ -474,15 +537,17 @@ results$p_value <- map_df(lapply(res_0$marginals.fixed,
 head(results)
 
 
-results_10 <- results |>
-    filter(grepl("cluster5", variable) == TRUE)
+results_10 <- results# |>
+    # filter(grepl("cluster10", variable) == TRUE)
 
 # tidying
-results_10$variable <- str_replace(results_10$variable, "cluster5:exposure_week", "")
-results_10$variable <- ifelse(results_10$variable == "cluster5", "week_1",
-                           results_10$variable)
+# results_10$variable <- str_replace(results_10$variable, "cluster10:exposure_week", "")
+results_10$exposure <- str_split_fixed(results_10$variable, ":", n = 2)[, 1]
+results_10$week <- str_split_fixed(results_10$variable, ":", n = 2)[, 2]
+# results_10$variable <- ifelse(results_10$variable == "cluster10", "week_1",
+#                            results_10$variable)
 results_10$week <- as.numeric(
-  str_replace(results_10$variable, "week_", ""))
+  str_replace(results_10$week, "exposure_weekweek_", ""))
 
 head(results_10)
 
@@ -498,6 +563,14 @@ results_10$or <- exp(results_10$mean)
 results_10$lwr <- exp(results_10$q0.025)
 results_10$upr <- exp(results_10$q0.975)
 
+results_10 <- results_10 |>
+  filter(grepl("cluster", exposure) == TRUE) |>
+  mutate(exposure = str_replace(exposure, "cluster", ""))
+
+results_10 <- results_10 |>
+  filter(exposure != 0) |>
+  mutate(exposure = as.numeric(exposure))
+
 ref_allelse <- ggplot(results_10, aes(x = week, y = or)) +
   geom_point() +
   geom_linerange(aes(ymin = lwr, ymax = upr)) +
@@ -507,8 +580,9 @@ ref_allelse <- ggplot(results_10, aes(x = week, y = or)) +
   ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
   xlab("Exposure Week") +
   theme_classic() +
-  theme(axis.title.y = element_text(angle = 0, vjust = 0.6, hjust = 1))
-
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.6, hjust = 1)) +
+  facet_wrap(~exposure, scales = "free")
+ref_allelse
 
 ref_6 <- cl_results |>
   filter(cluster == 5) |>
@@ -525,6 +599,10 @@ ref_6 <- cl_results |>
 
 
 ggarrange(ref_allelse, ref_6)
+
+### storing results
+write.csv(results_10, "inla_compared to 6.csv", row.names = FALSE)
+
 
 
 ```
