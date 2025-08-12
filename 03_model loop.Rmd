@@ -50,7 +50,7 @@ full_dat$very_preterm <- ifelse(full_dat$gestation < 30, "preterm", "term")
 full_dat$gender_code <- ifelse(full_dat$gender == "M", 1, 0)
 
 # grab confounders
-dat <- fread("/Users/brenna/Downloads/birth_exposures_with_confounders.csv")
+dat <- fread("/Users/brenna/Documents/School/Research/distributed_lag/data/birth_exposures_with_confounders.csv")
 
 confounders <- dat[, c("momid", "grid_id", "gestation", "birthccyy", "birthmm", 
                        "mommedicaid_char", "mommaritalstatus_char",
@@ -165,7 +165,7 @@ write.csv(tab1, file = "data/results/table_1_mom.csv")
 inla_models <- list()
 inla_results <- list()
 
-for(i in 1:12) {
+for(i in c(3, 4, 7, 8)) {
   
   ##### encoding clusters
   recode_fx <- function(x) {
@@ -198,6 +198,8 @@ for(i in 1:12) {
   
   dat_10_long$race_ethn <- relevel(as.factor(dat_10_long$race_ethn), ref = "white")
   
+  summary(dat_10_long$cluster_10)
+  
   res_1 <- inla(preterm_code ~ #f(momid, model = "iid", hyper = prec.prior) +
                   cluster_10*exposure_week +
                   f(week, model = "rw1") +
@@ -227,9 +229,15 @@ for(i in 1:12) {
                                    p_value_function),
                             ~as.data.frame(.)) |>
     rename(p_value = `.`)
-  results$p_value <- ifelse(results$mean < 0,
-                            1 - results$p_value,
-                            results$p_value)
+  
+  results <- results |>
+    mutate(p_value = case_when(results$mean < 0 ~ (1 - results$p_value),
+                               results$mean > 0 ~ results$p_value))
+  
+  # results$p_value <- ifelse(results$mean < 0,
+  #                           (1 - results$p_value),
+  #                           results$p_value)
+  # .. the strangest thing; ^this doesn't work
   
   results <- results |>
     filter(grepl("cluster_101", variable) == TRUE)
@@ -244,8 +252,8 @@ for(i in 1:12) {
   # bonferroni adjustment
   alpha_level = 0.05 / (33 * 12) # 33 weeks, 12 clusters
   
-  results$bonferroni <- ifelse(results$p_value > alpha_level, "not", "significant")
-  table(results$bonferroni)
+  # results$bonferroni <- ifelse(results$p_value > alpha_level, "not", "significant")
+  # table(results$bonferroni)
   # not significant, but that's alright; I've always wanted to publish a paper without any "significant" results
   
   # exponentiating
@@ -286,8 +294,7 @@ inla_results
 #               plot.predictor = FALSE, cex = 1.25))
 #   
 # }
-# 
-
+#  
 ```
 
 
@@ -300,35 +307,29 @@ cl_results <- map_df(inla_results, ~as.data.frame(.))
 
 cl_results$cluster <- as.factor(cl_results$cluster)
 
+# multiple comparisons with false discovery rate
+cl_results$p_fdr <- p.adjust(unlist(cl_results$p_value), method = "fdr")
+cl_results$p_value <- cl_results$p_value$p_value
+cl_results <- cl_results |>
+  arrange(cluster, week)
+
 # write.csv(cl_results, "data/results/inla_results.csv", row.names = FALSE)
+# don't duplicate information (written below)
 
-cl_plt <- ggplot(cl_results, aes(x = week, y = or)) +
-  geom_point() +
-  geom_linerange(aes(ymin = lwr, ymax = upr)) +
-  geom_hline(yintercept = 1) +
-  # facet_wrap(~ cluster, scales = "fixed") +
-  ggtitle("Exposure to Mixtures (Clusters) Throughout Pregnancy") +
-  ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
-  xlab("Exposure Week") +
-  # ylim(0.15, 5) +
-  theme_classic() +
-  theme(axis.title.y = element_text(angle = 0, vjust = 0.5, hjust = 1)) +
-  facet_wrap(~cluster, scales = "free")
-
-cl_plt
-
-names(cl_results)
+cl_results$sig <- ifelse(cl_results$p_fdr < 0.05, "significant", "not")
 
 write.csv(cl_results, "data/results/cl_results.csv", row.names = FALSE)
 
+# plot all results, by FDR significance
+cols <- c("significant" = "red", "not" = "black")
 
-##### just cluster 5, 10, 1
-cl_results |>
-  filter(cluster %in% c(1, 5, 10, 11)) |>
-  ggplot(aes(x = week, y = or)) +
+library(extrafont)
+
+cl_plt <- ggplot(cl_results, aes(x = week, y = or, colour = sig)) +
   geom_point() +
   geom_linerange(aes(ymin = lwr, ymax = upr)) +
   geom_hline(yintercept = 1) +
+  scale_colour_manual(values = cols, labels = c("p < 0.05 after FDR", "p ≥ 0.05 after FDR")) +
   # facet_wrap(~ cluster, scales = "fixed") +
   ggtitle("Exposure to Mixtures (Clusters) Throughout Pregnancy") +
   ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
@@ -336,7 +337,32 @@ cl_results |>
   # ylim(0.15, 5) +
   theme_classic() +
   theme(axis.title.y = element_text(angle = 0, vjust = 0.5, hjust = 1)) +
-  facet_wrap(~cluster, scales = "free")
+  facet_wrap(~cluster, scales = "free") +
+  theme(text = element_text(colour = "black",
+                            family = "Century Gothic",
+                            face = "plain"))
+
+## export
+
+cl_plt
+
+class(cl_results)
+##### just cluster 5, 10, 1
+cl_results |>
+  filter(cluster %in% c(1, 5, 10, 11)) |>
+  ggplot(aes(x = week, y = or, colour = sig)) +
+  geom_point() +
+  geom_linerange(aes(ymin = lwr, ymax = upr)) +
+  geom_hline(yintercept = 1) +
+  scale_colour_manual(values = c("black", "red")) +
+  # facet_wrap(~ cluster, scales = "fixed") +
+  ggtitle("Exposure to Mixtures (Clusters) Throughout Pregnancy") +
+  ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
+  xlab("Exposure Week") +
+  # ylim(0.15, 5) +
+  theme_classic() +
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.5, hjust = 1)) +
+  facet_wrap(~cluster, scales = "fixed")
 
 
 

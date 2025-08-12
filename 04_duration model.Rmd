@@ -10,8 +10,6 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 
-
-
 ```{r}
 
 library(INLA)
@@ -51,7 +49,7 @@ full_dat$very_preterm <- ifelse(full_dat$gestation < 30, "preterm", "term")
 full_dat$gender_code <- ifelse(full_dat$gender == "M", 1, 0)
 
 # grab confounders
-dat <- fread("/Users/brenna/Downloads/birth_exposures_with_confounders.csv")
+dat <- fread("/Users/brenna/Documents/School/Research/distributed_lag/data/birth_exposures_with_confounders.csv")
 
 confounders <- dat[, c("momid", "grid_id", "gestation", "birthccyy", "birthmm", 
                        "mommedicaid_char", "mommaritalstatus_char",
@@ -196,8 +194,10 @@ summary(m_1)
 
 p_value_function <- function(x) inla.pmarginal(0, x)
 
-duration_alpha_level = 0.05 / (6 * 12) # 6 week-window, for 12 clusters
-duration_alpha_level_1 = 0.05 / (5 * 12) # 1 week-window, for 12 clusters; for cw_1
+## Bonferroni is dead
+# duration_alpha_level = 0.05 / (6 * 12) # 6 week-window, for 12 clusters
+# duration_alpha_level_1 = 0.05 / (5 * 12) # 1 week-window, for 12 clusters; for cw_1
+## Long live FDR (see below, )
 
 # storing results
 cw_res_10 <- data.frame(variable = rownames(m_10$summary.fixed),
@@ -212,10 +212,7 @@ cw_res_10 <- data.frame(variable = rownames(m_10$summary.fixed),
   mutate(duration = as.numeric(str_replace(variable, "duration_10", ""))) |>
   mutate(or = exp(mean)) |>
   mutate(lwr = exp(q0.025)) |>
-  mutate(upr = exp(q0.975)) |>
-  mutate(bonferroni = ifelse(p_value > duration_alpha_level, "not", "significant"))
-# write.csv(cw_res_10, "data/results/cw_res_10.csv", row.names = FALSE)
-# cw_res_10 <- read.csv("data/results/cw_res_10.csv")
+  mutate(upr = exp(q0.975))
 
 cw_res_5 <- data.frame(variable = rownames(m_5$summary.fixed),
                        mean = m_5$summary.fixed$mean,
@@ -229,10 +226,7 @@ cw_res_5 <- data.frame(variable = rownames(m_5$summary.fixed),
   mutate(duration = as.numeric(str_replace(variable, "duration_5", ""))) |>
   mutate(or = exp(mean)) |>
   mutate(lwr = exp(q0.025)) |>
-  mutate(upr = exp(q0.975)) |>
-  mutate(bonferroni = ifelse(p_value > duration_alpha_level, "not", "significant"))
-# write.csv(cw_res_5, "data/results/cw_res_5.csv", row.names = FALSE)
-# cw_res_5 <- read.csv("data/results/cw_res_5.csv")
+  mutate(upr = exp(q0.975))
 
 cw_res_1 <- data.frame(variable = rownames(m_1$summary.fixed),
                        mean = m_1$summary.fixed$mean,
@@ -246,10 +240,31 @@ cw_res_1 <- data.frame(variable = rownames(m_1$summary.fixed),
   mutate(duration = as.numeric(str_replace(variable, "duration_1", ""))) |>
   mutate(or = exp(mean)) |>
   mutate(lwr = exp(q0.025)) |>
-  mutate(upr = exp(q0.975)) |>
-  mutate(bonferroni = ifelse(p_value > duration_alpha_level_1, "not", "significant"))
+  mutate(upr = exp(q0.975))
+
+# adjust for all comparisons — all windows
+cw_res_10 <- cw_res_10 |>
+  mutate(fdr = p.adjust(c(cw_res_10$p_value, cw_res_5$p_value, cw_res_1$p_value), 
+                        method = "fdr")[1:6],
+         fdr_sig = ifelse(fdr < 0.05, "significant", "not"))
+cw_res_5 <- cw_res_5 |>
+  mutate(fdr = p.adjust(c(cw_res_10$p_value, cw_res_5$p_value, cw_res_1$p_value), 
+                        method = "fdr")[7:12],
+         fdr_sig = ifelse(fdr < 0.05, "significant", "not"))
+cw_res_1 <- cw_res_1 |>
+  mutate(fdr = p.adjust(c(cw_res_10$p_value, cw_res_5$p_value, cw_res_1$p_value), 
+                        method = "fdr")[13:17],
+         fdr_sig = ifelse(fdr < 0.05, "significant", "not"))
+
+# write.csv(cw_res_10, "data/results/cw_res_10.csv", row.names = FALSE)
+# cw_res_10 <- read.csv("data/results/cw_res_10.csv")
+# 
+# write.csv(cw_res_5, "data/results/cw_res_5.csv", row.names = FALSE)
+# cw_res_5 <- read.csv("data/results/cw_res_5.csv")
+# 
 # write.csv(cw_res_1, "data/results/cw_res_1.csv", row.names = FALSE)
 # cw_res_1 <- read.csv("data/results/cw_res_1.csv")
+
 
 ```
 
@@ -262,37 +277,43 @@ plt_cw_10 <- ggplot(cw_res_10, aes(x = duration, y = or)) +
   geom_point() +
   geom_linerange(aes(ymin = lwr, ymax = upr)) +
   geom_hline(yintercept = 1) +
-  ggtitle("Cluster 10 Critical Window Exposure") +
+  ggtitle("Cluster 10 Exposure \nin Weeks 9-14") +
   ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
-  xlab("Duration of Exposure (weeks 9-14)") +
+  xlab("Duration of Exposure (Weeks)") +
+  ylim(c(0, 4)) +
   theme_classic() +
+  scale_x_continuous(breaks = 1:6) +
   theme(axis.title.y = element_text(angle = 0, vjust = 0.6, hjust = 1))
 
 plt_cw_5 <- ggplot(cw_res_5, aes(x = duration, y = or)) +
   geom_point() +
   geom_linerange(aes(ymin = lwr, ymax = upr)) +
   geom_hline(yintercept = 1) +
-  ggtitle("Cluster 5 Critical Window Exposure") +
+  ggtitle("Cluster 5 Exposure \nin Weeks 24-29") +
   ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
-  xlab("Duration of Exposure (weeks 24-29)") +
+  xlab("Duration of Exposure (Weeks)") +
+  ylim(c(0, 4)) +
   theme_classic() +
+  scale_x_continuous(breaks = 1:6) +
   theme(axis.title.y = element_text(angle = 0, vjust = 0.6, hjust = 1))
-
 
 plt_cw_1 <- ggplot(cw_res_1, aes(x = duration, y = or)) +
   geom_point() +
   geom_linerange(aes(ymin = lwr, ymax = upr)) +
   geom_hline(yintercept = 1) +
-  ggtitle("Cluster 1 Critical Window Exposure") +
+  ggtitle("Cluster 1 Exposure \nin Weeks 9-13") +
   ylab("Odds of \nPreterm Birth \n(≤34 weeks)") +
-  xlab("Duration of Exposure (weeks 9-13)") +
+  xlab("Duration of Exposure (Weeks)") +
+  ylim(c(0, 4)) +
   theme_classic() +
   theme(axis.title.y = element_text(angle = 0, vjust = 0.6, hjust = 1))
 
 ggarrange(plt_cw_10,
           plt_cw_5,
-          plt_cw_1)
+          plt_cw_1,
+          ncol = 3)
 
+# save as 12"x5", durations_panel.png
 
 ```
 
@@ -303,18 +324,25 @@ ggarrange(plt_cw_10,
 library(tableone)
 
 CreateTableOne(vars = c("duration_10", "duration_5"), strata = "preterm", data = dat_con)
-# duration varies significantly across outcome for cluster 10, but not for cluster 5
+# duration varies significantly across outcome for cluster 10, but much less so for cluster 5
+
+cor.test(as.numeric(dat_con$gestation), 
+         as.numeric(dat_con$duration_10))
+# slight but significant negative correlation between duration of cluster 10 exposure and gestational age
 
 ```
 
 
 ```{r}
 
+# the combination of clsuter 5 and 10; for reviewers only, as needed
+
 comp_5_10 <- dat_con |>
   mutate(exposure_10_cw = ifelse(duration_10 != 0, 1, 0)) |>
   mutate(exposure_5_cw = ifelse(duration_5 != 0, 1, 0))
 
-table(comp_5_10$exposure_10_cw)
+table(comp_5_10$exposure_10_cw,
+      comp_5_10$exposure_5_cw)
 
 comparison_5_10 <- inla(preterm_code ~ exposure_10_cw*exposure_5_cw +
                           poverty_rate_sc + race_ethn, 
@@ -338,8 +366,9 @@ comparison_5_10 <- data.frame(variable = rownames(comparison_5_10$summary.fixed)
   # mutate(duration = as.numeric(str_replace(variable, "duration_5", ""))) |>
   mutate(or = exp(mean)) |>
   mutate(lwr = exp(q0.025)) |>
-  mutate(upr = exp(q0.975)) |>
-  mutate(bonferroni = ifelse(p_value > duration_alpha_level, "not", "significant"))
+  mutate(upr = exp(q0.975)) #|>
+  # bonferroni is dead
+  # mutate(bonferroni = ifelse(p_value > duration_alpha_level, "not", "significant"))
 # write.csv(comparison_5_10, "data/results/comparison_5_10.csv", row.names = FALSE)
 # comparison_5_10 <- read.csv("data/results/comparison_5_10.csv")
 
