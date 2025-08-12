@@ -236,6 +236,7 @@ cw_res_1 <- data.frame(variable = rownames(m_1$summary.fixed),
                                   p_value_function),
                            ~as.data.frame(.))) |>
   rename(p_value = `.`) |>
+  mutate(p_value = 1 - p_value) |>
   filter(grepl("duration", variable) == TRUE) |>
   mutate(duration = as.numeric(str_replace(variable, "duration_1", ""))) |>
   mutate(or = exp(mean)) |>
@@ -330,6 +331,9 @@ cor.test(as.numeric(dat_con$gestation),
          as.numeric(dat_con$duration_10))
 # slight but significant negative correlation between duration of cluster 10 exposure and gestational age
 
+table(comp_5_10$duration_10)
+# how common was exposure to the full window
+
 ```
 
 
@@ -374,8 +378,6 @@ comparison_5_10 <- data.frame(variable = rownames(comparison_5_10$summary.fixed)
 
 
 ```
-
-
 
 
 
@@ -479,7 +481,7 @@ for(i in 1:12) {
     mutate(or = exp(mean)) |>
     mutate(lwr = exp(q0.025)) |>
     mutate(upr = exp(q0.975)) |>
-    mutate(bonferroni = ifelse(p_value > duration_alpha_level, "not", "significant")) |>
+    # mutate(bonferroni = ifelse(p_value > duration_alpha_level, "not", "significant")) |>
     mutate(cluster = i)
   
 }
@@ -490,7 +492,9 @@ cw_10_comparison <- map_df(cw_10_loop, ~as.data.frame(.))
 # cw_10_comparison <- read.csv("data/results/cw_10_comparison.csv")
 
 # just a note —
-table(cw_10_comparison$bonferroni)
+# table(cw_10_comparison$bonferroni)
+cw_10_comparison$fdr <- p.adjust(cw_10_comparison$p_value, method = "fdr")
+table(p.adjust(cw_10_comparison$p_value, method = "fdr") < 0.05)
 # one significant after bonferroni — cluster 10, exposure during entire critical window
 
 ggplot(cw_10_comparison, aes(x = duration, y = or)) +
